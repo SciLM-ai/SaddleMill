@@ -1,20 +1,15 @@
 from __future__ import annotations
 
 import logging
-import os
+
 import numpy as np
-import torch
 from ase.optimize.precon import Precon, PreconImages
-from torch.utils.data import DataLoader
 
 from fairchem.core.common.utils import setup_imports, setup_logging
 from fairchem.core.datasets.atomic_data import atomicdata_list_to_batch
 from fairchem.core.calculate import FAIRChemCalculator
 
-try:
-    from ase.neb import DyNEB, NEBState
-except ImportError:  # newest unreleased version has changed imports
-    from ase.mep.neb import DyNEB, NEBState
+from ase.mep.neb import DyNEB, NEBState
 
 
 class OCPNEB(DyNEB):
