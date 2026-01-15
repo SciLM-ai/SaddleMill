@@ -15,13 +15,15 @@ calc = FAIRChemCalculator(predictor, task_name="omat")
 atoms = bulk('C', 'diamond', a=3.57)
 atoms = make_supercell(atoms, np.diag([2,2,2]))
 
-def main(i):
+
+def geomopt(i):
     atoms.positions += np.random.random((16,3))
     atoms.calc = calc
 
     opt = FIRE(FrechetCellFilter(atoms), logfile=f'optimization{i}.log')
     opt.run(0.0001, 1000)
 
+
 if __name__ == "__main__":
     for i in range(3):
-        main(sys.argv[1])
+        geomopt(sys.argv[1])

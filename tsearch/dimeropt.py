@@ -32,7 +32,7 @@ def turn_into_supercell(atoms):
     return atoms
 
 
-def main():
+def dimeropt():
     # --- CONFIG & SETUP ---
     rank = int(os.environ.get("SLURM_PROCID", 0))
     world_size = int(os.environ.get("SLURM_NTASKS", 1))
@@ -234,4 +234,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    dimeropt(sys.argv[1])
