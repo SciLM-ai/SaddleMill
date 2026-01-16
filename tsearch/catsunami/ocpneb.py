@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-
 import numpy as np
 from ase.optimize.precon import Precon, PreconImages
 
@@ -93,7 +92,6 @@ class OCPNEB(DyNEB):
         else:
             energies_calcd = []
             forces_calcd = []
-
             for i in range(0, len(images), self.batch_size):
                 batch_images = images[i : i + self.batch_size]
                 data_list = [self.a2g(img) for img in batch_images]
@@ -101,7 +99,7 @@ class OCPNEB(DyNEB):
 
                 predictions = self.predictor.predict(batch)
                 energies_calcd.extend(predictions["energy"].detach().cpu().flatten().tolist())
-                forces_calcd.extend(predictions["forces"].cpu().numpy())
+                forces_calcd.extend(predictions["forces"].detach().cpu().numpy())
 
             forces = np.array(forces_calcd)
 
@@ -127,6 +125,7 @@ class OCPNEB(DyNEB):
 
             self.intermediate_forces = forces
             self.intermediate_energies = energies
+            self.cached = True
 
         if not self.dynamic_relaxation:
             return forces
@@ -153,11 +152,12 @@ class OCPNEB(DyNEB):
                 else:
                     # Set forces to zero before they are sent to optimizer.
                     forces[n1:n2, :] = 0
-        self.cached = True
 
         return forces
 
     def set_positions(self, positions):
+
+        self.cached = False
         if not self.dynamic_relaxation:
             return super().set_positions(positions)
 
@@ -183,7 +183,6 @@ class OCPNEB(DyNEB):
                     # image.set_positions(new_positions)
                     image.set_positions(positions[n1:n2])
                     n1 = n2
-        self.cached = False
         return None
 
     def get_precon_forces(self, forces, energies, images):
