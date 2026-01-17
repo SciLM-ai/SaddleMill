@@ -7,15 +7,15 @@
 Load necessary modules and create the base Conda environment.
 
 ```bash
-module unload impi, python
+module unload impi python3
 module load cuda/12.8
+
+# Enter idev to get a GPU node
+idev -A CHE23004 -p gpu-a100-dev -t 02:00:00
 
 # Create base environment
 conda create --prefix /work/08405/ilgar/ls6/conda_envs/executorlib -c conda-forge python=3.12 flux-core flux-sched openmpi=5.0.5 "libhwloc=*=cuda*" executorlib
 conda activate executorlib
-
-export LD_LIBRARY_PATH=$TACC_CUDA_LIB:$LD_LIBRARY_PATH
-export FLUX_MODULE_PATH=$CONDA_PREFIX/lib/flux/modules
 
 find $CONDA_PREFIX -name "sched-fluxion-*.so" -path "*feedstock_root*" -exec cp {} $CONDA_PREFIX/lib/flux/modules/ \;
 
@@ -62,7 +62,7 @@ Clone the environment and install specific machine learning libraries.
 ```bash
 conda create --prefix /work/08405/ilgar/vista/conda_libraries/tsearch --clone executorlib
 
-pip install fairchem-core
+pip install --cache-dir <scratch_cache_dir> fairchem-core
 # This part below is only necessary for Vista and not for Lonestar6
 pip uninstall torch
 pip install "torch==2.9.0+cu128" --index-url https://download.pytorch.org/whl/cu128
@@ -113,7 +113,14 @@ idev -p gh-dev -m 120 -A CHE23004
 Ensure you run these commands (or add to `.bashrc`) every time you log in or start a job:
 
 ```bash
-module unload xalt
+# On Vista:
 export LD_LIBRARY_PATH=/opt/apps/cuda/12.4/targets/sbsa-linux/lib/:$LD_LIBRARY_PATH
+export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
+
+# On LS6:
+module unload impi python3
+module load cuda/12.8
+export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
+
 
 ```
