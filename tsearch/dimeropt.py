@@ -6,7 +6,7 @@ import random
 import zipfile
 import numpy as np
 import pandas as pd
-from ase.io import Trajectory, read
+from ase.io import Trajectory
 from ase.build import make_supercell
 from ase.mep import DimerControl, MinModeAtoms, MinModeTranslate
 from ase.calculators.singlepoint import SinglePointCalculator
@@ -52,9 +52,9 @@ def dimeropt(i, config_dict, atoms_orig, executorlib_worker_id=None):
     my_output_file = f"{method_name}_trajes/collected_ts_rank_{rank}.traj"
     zip_name = f"{method_name}_debug_zips/structure_rank_{rank}_data.zip"
 
-    def log_status(idx, attempt, rm_idx, status_msg):
+    def log_status(attempt, rm_idx, status_msg):
         with open(status_file, 'a') as f:
-            f.write(f"{idx},{rank},{attempt},{rm_idx},{status_msg}\n")
+            f.write(f"{i},{rank},{attempt},{rm_idx},{status_msg}\n")
 
     # --- MAIN LOOP ---
     with Trajectory(my_output_file, 'a') as writer:
@@ -65,7 +65,6 @@ def dimeropt(i, config_dict, atoms_orig, executorlib_worker_id=None):
 
         try:
             # Look up structure from main DF using the index
-            #atoms_orig = read(io.StringIO(df.at[i,'cif']), format='cif')
             atoms_orig = turn_into_supercell(atoms_orig)
 
             # Fresh random sampling for this restart
@@ -131,7 +130,7 @@ def dimeropt(i, config_dict, atoms_orig, executorlib_worker_id=None):
                     converged = False
 
                 if converged:
-                    log_status(i, attempt, rm_idx, "converged")
+                    log_status(attempt, rm_idx, "converged")
                 elif not converged and not stopped_early:
                     # Extension check
                     if np.sqrt((d_atoms.get_forces()**2).sum(axis=1).max()) < 0.4 and d_atoms.get_curvature() < -0.2:
@@ -142,13 +141,13 @@ def dimeropt(i, config_dict, atoms_orig, executorlib_worker_id=None):
                             converged = False
 
                         if converged:
-                            log_status(i, attempt, rm_idx, "converged_after_extension")
+                            log_status(attempt, rm_idx, "converged_after_extension")
                         else:
-                            log_status(i, attempt, rm_idx, "not_converged_after_extension")
+                            log_status(attempt, rm_idx, "not_converged_after_extension")
                     else:
-                        log_status(i, attempt, rm_idx, "not_converged")
+                        log_status(attempt, rm_idx, "not_converged")
                 else:
-                    log_status(i, attempt, rm_idx, "not_converged_delocalized")
+                    log_status(attempt, rm_idx, "not_converged_delocalized")
 
                 # Metadata
                 eigenmode = d_atoms.get_eigenmode()
@@ -172,7 +171,6 @@ def dimeropt(i, config_dict, atoms_orig, executorlib_worker_id=None):
                     if True:  # converged or unconverged
                         with zipfile.ZipFile(zip_name, 'a', zipfile.ZIP_DEFLATED) as zf:
                             for f_name in existing_files:
-                                print('zipping', f_name)
                                 zf.write(f_name, arcname=f"attempt_{attempt}_{f_name}")
                     for f_name in existing_files:
                         os.remove(f_name)
@@ -186,6 +184,4 @@ def dimeropt(i, config_dict, atoms_orig, executorlib_worker_id=None):
                         zf.write(f_name, arcname=f"attempt_{attempt}_ERROR_{f_name}")
                 for f_name in existing_files:
                     os.remove(f_name)
-            log_status(i, attempt, rm_idx, "error")
-
-    print(f"Rank {rank}: Finished.")
+            log_status(attempt, rm_idx, "error")

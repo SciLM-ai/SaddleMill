@@ -24,11 +24,11 @@ def load_method(config_dict):
         from tsearch.dimeropt import dimeropt as method
     elif method_name.lower() == "minimization":
         from tsearch.geomopt import geomopt as method
-    elif method_name.lower() == "DoubleMinimization":
+    elif method_name.lower() == "doubleminimization":
         from tsearch.geomopt import doublegeomopt as method
     else:
         raise NotImplementedError(
-            f"Method '{method_name}' is not implemented. Only NEB, Dimer, and Minimization are supported."
+            f"Method '{method_name}' is not implemented. Only NEB, Dimer, Minimization, and DoubleMinimization are supported."
         )
     return method
 
