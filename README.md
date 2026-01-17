@@ -1,5 +1,26 @@
 # tsearch
 
+## Installation on Lonestar6
+
+### 1. Base Environment Setup
+
+Load necessary modules and create the base Conda environment.
+
+```bash
+module unload impi, python
+module load cuda/12.8
+
+# Create base environment
+conda create --prefix /work/08405/ilgar/ls6/conda_envs/executorlib -c conda-forge python=3.12 flux-core flux-sched openmpi=5.0.5 "libhwloc=*=cuda*" executorlib
+conda activate executorlib
+
+export LD_LIBRARY_PATH=$TACC_CUDA_LIB:$LD_LIBRARY_PATH
+export FLUX_MODULE_PATH=$CONDA_PREFIX/lib/flux/modules
+
+find $CONDA_PREFIX -name "sched-fluxion-*.so" -path "*feedstock_root*" -exec cp {} $CONDA_PREFIX/lib/flux/modules/ \;
+
+```
+
 ## Installation on Vista
 
 ### 1. Base Environment Setup
@@ -7,9 +28,6 @@
 Load necessary modules and create the base Conda environment.
 
 ```bash
-module reset
-module unload xalt
-
 # Create base environment
 conda create -n executorlib -c conda-forge python=3.12 flux-core flux-sched "openmpi=5.0.5=external_*" executorlib
 conda activate executorlib
@@ -45,8 +63,8 @@ Clone the environment and install specific machine learning libraries.
 conda create --prefix /work/08405/ilgar/vista/conda_libraries/tsearch --clone executorlib
 
 pip install fairchem-core
+# This part below is only necessary for Vista and not for Lonestar6
 pip uninstall torch
-# Install PyTorch with CUDA 12.8 support
 pip install "torch==2.9.0+cu128" --index-url https://download.pytorch.org/whl/cu128
 
 ```
