@@ -3,6 +3,9 @@ from tsearch.tools import parse_inputfile, load_calculator, load_optimizer
 config_dict = parse_inputfile("config.ini")
 if config_dict["Main"]["jobs_per_gpu"] != 1: os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from pathlib import Path
 import zipfile, os
 from ase.optimize import BFGS
@@ -135,6 +138,7 @@ def nebopt(i, config_dict, traj_name, executorlib_worker_id=None):
         # Create a figure of the band. However this slows it down by around 4 second per NEB optimization
         fig = nebtools.plot_band()
         fig.savefig(temp_plot)
+        plt.close(fig)
 
         # Clean up temp files
         existing_files = [f for f in temp_files if os.path.exists(f)]
