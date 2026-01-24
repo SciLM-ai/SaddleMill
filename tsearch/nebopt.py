@@ -10,7 +10,6 @@ from pathlib import Path
 import zipfile, os
 import numpy as np
 from ase.data import covalent_radii
-from ase.optimize import BFGS
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase.io import Trajectory
 from ase.mep.neb import NEB, NEBTools, NEBState
@@ -54,10 +53,10 @@ def nebopt(i, config_dict, traj_name, executorlib_worker_id=None):
         if relax_endpoints:
             if not interpolate_method: print("Are you sure you want to relax end points while keeping the intermediate inages from your traj?")
             reactant.calc = calc
-            opt = BFGS(reactant, trajectory=temp_react_relax)
+            opt = Optimizer(reactant, trajectory=temp_react_relax)
             opt.run(config_dict["ourNEB"]["endpoint_relax_fmax"], config_dict["ourNEB"]["endpoint_relax_maxsteps"])
             product.calc = calc
-            opt = BFGS(product, trajectory=temp_prod_relax)
+            opt = Optimizer(product, trajectory=temp_prod_relax)
             opt.run(config_dict["ourNEB"]["endpoint_relax_fmax"], config_dict["ourNEB"]["endpoint_relax_maxsteps"])
 
         if interpolate_method:
