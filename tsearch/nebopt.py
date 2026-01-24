@@ -53,11 +53,11 @@ def nebopt(i, config_dict, traj_name, executorlib_worker_id=None):
         if relax_endpoints:
             if not interpolate_method: print("Are you sure you want to relax end points while keeping the intermediate inages from your traj?")
             reactant.calc = calc
-            opt = Optimizer(reactant, trajectory=temp_react_relax)
-            opt.run(config_dict["ourNEB"]["endpoint_relax_fmax"], config_dict["ourNEB"]["endpoint_relax_maxsteps"])
+            opt = Optimizer(reactant, trajectory=temp_react_relax, **config_dict[config_dict["Main"]["Optimizer"]])
+            opt.run(config_dict["ourNEB"]["endpoint_relax_fmax"], config_dict["ourNEB"]["endpoint_relax_steps"])
             product.calc = calc
-            opt = Optimizer(product, trajectory=temp_prod_relax)
-            opt.run(config_dict["ourNEB"]["endpoint_relax_fmax"], config_dict["ourNEB"]["endpoint_relax_maxsteps"])
+            opt = Optimizer(product, trajectory=temp_prod_relax, **config_dict[config_dict["Main"]["Optimizer"]])
+            opt.run(config_dict["ourNEB"]["endpoint_relax_fmax"], config_dict["ourNEB"]["endpoint_relax_steps"])
 
         if interpolate_method:
             if interpolate_method == "ocp_idpp":
