@@ -5,6 +5,7 @@
 #SBATCH -p gh
 #SBATCH -t 48:00:00
 #SBATCH -A CHE23004
+#SBATCH -J dimer1
 
 # module unload xalt
 # export LD_LIBRARY_PATH=/opt/apps/cuda/12.4/targets/sbsa-linux/lib/:$LD_LIBRARY_PATH

@@ -12,12 +12,12 @@ class ConfigManager:
             "fmax": 0.05,
             "steps": 1000,
             "Calculator": "FAIRChemCalculator",
-            "jobs_per_gpu": 4,
+            "jobs_per_gpu": 1,
         },
         "FAIRChemCalculator": {
             "device": 'cuda',
             "model_name_or_path": 'uma-s-1p1',
-            "task_name": None,
+            "task_name": None,  # requires user input
         },
         "ourMinimization": {
             "relax_cell": True,
@@ -29,9 +29,9 @@ class ConfigManager:
             "relax_endpoints": True,
             "endpoint_relax_fmax": 0.01,
             "endpoint_relax_maxsteps": 500,
-            "interpolate_method": "ocp_idpp",
+            "interpolate_method": "ase_linear",
             "num_frames": 10,
-            "batch_size": 8
+            "batch_size": 4,
         },
         "ourDimer": {
             "dataset_type": None,
