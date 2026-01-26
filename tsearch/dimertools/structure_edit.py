@@ -96,4 +96,7 @@ def get_attempts(atoms, config_dict):
                 displacement_dicts.append({"mask": mask})
                 selected_indices.append(-1)
 
+    else:
+        raise Exception("dataset_type in ourDimer must be set")
+
     return images, displacement_dicts, selected_indices

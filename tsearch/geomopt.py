@@ -6,6 +6,7 @@ from ase.io import Trajectory
 from ase.filters import FrechetCellFilter
 from ase.calculators.singlepoint import SinglePointCalculator
 from tsearch.config import load_config, load_calculator, load_optimizer
+from tsearch.tools import check_reaction, check_adsorbate_reaction
 
 
 config_dict = load_config("config.ini")
@@ -158,6 +159,18 @@ def doublegeomopt(i, config_dict, atoms, executorlib_worker_id=None):
             min2.info['parent_ts_index'] = parent_source_idx
             min2.info['converged'] = conv2
 
+            # --- CHECK REACTION ---
+            neighbor_fudge = 1.25
+            is_reaction = check_reaction(min1, min2, neighbor_fudge=neighbor_fudge)
+            is_ads_reaction = check_adsorbate_reaction(min1, min2, neighbor_fudge=neighbor_fudge,
+                                     target_tag=2)
+            min1.info['is_reaction'] = is_reaction
+            min1.info['is_ads_reaction'] = is_ads_reaction
+            min2.info['is_reaction'] = is_reaction
+            min2.info['is_ads_reaction'] = is_ads_reaction
+            ts_atoms.info['is_reaction'] = is_reaction
+            ts_atoms.info['is_ads_reaction'] = is_ads_reaction
+
             # --- WRITE TRIPLET (Min1 -> TS -> Min2) ---
             writer.write(min1)
             writer.write(ts_atoms)
@@ -186,3 +199,4 @@ def doublegeomopt(i, config_dict, atoms, executorlib_worker_id=None):
                         zf.write(f_name, arcname=f"ERROR_{f_name}")
                 for f_name in existing_files:
                     os.remove(f_name)
+
