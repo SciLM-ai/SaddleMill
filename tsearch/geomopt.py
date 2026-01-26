@@ -13,8 +13,8 @@ calc = load_calculator(config_dict)
 Optimizer = load_optimizer(config_dict)
 
 
-def relax_structure(config_dict, atoms, logfile, trajfile):
-    opt = Optimizer(FrechetCellFilter(atoms), logfile=logfile, trajectory=trajfile,
+def relax_structure(config_dict, optimizable, logfile, trajfile):
+    opt = Optimizer(optimizable, logfile=logfile, trajectory=trajfile,
                     **config_dict[config_dict["Main"]["Optimizer"]])
     converged = opt.run(fmax=config_dict["Main"]["fmax"], steps=config_dict["Main"]["steps"])
     return converged
@@ -42,7 +42,8 @@ def geomopt(i, config_dict, atoms, executorlib_worker_id=None):
         temp_files = [temp_opt_log, temp_traj]
 
         try:
-            converged = relax_structure(config_dict, atoms, temp_opt_log, temp_traj)
+            optimizable = FrechetCellFilter(atoms) if config_dict['our'+method_name]['relax_cell'] else atoms
+            converged = relax_structure(config_dict, optimizable, temp_opt_log, temp_traj)
             
             if converged:
                 log_status("converged")
@@ -129,7 +130,8 @@ def doublegeomopt(i, config_dict, atoms, executorlib_worker_id=None):
             traj1 = f'optimization_r{rank}_{i}-0.traj'
             temp_files.extend([log1, traj1])
             
-            conv1 = relax_structure(config_dict, min1, log1, traj1)
+            optimizable = FrechetCellFilter(min1) if config_dict['our'+method_name]['relax_cell'] else min1
+            conv1 = relax_structure(config_dict, optimizable, log1, traj1)
             
             # Freeze results
             min1.calc = SinglePointCalculator(min1, energy=min1.get_potential_energy(), forces=min1.get_forces())
@@ -147,7 +149,8 @@ def doublegeomopt(i, config_dict, atoms, executorlib_worker_id=None):
             traj2 = f'optimization_r{rank}_{i}-1.traj'
             temp_files.extend([log2, traj2])
             
-            conv2 = relax_structure(config_dict, min2, log2, traj2)
+            optimizable = FrechetCellFilter(min2) if config_dict['our'+method_name]['relax_cell'] else min2
+            conv2 = relax_structure(config_dict, optimizable, log2, traj2)
             
             # Freeze results
             min2.calc = SinglePointCalculator(min2, energy=min2.get_potential_energy(), forces=min2.get_forces())

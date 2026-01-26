@@ -20,8 +20,10 @@ class ConfigManager:
             "task_name": None,
         },
         "ourMinimization": {
+            "relax_cell": True,
         },
         "ourDoubleMinimization": {
+            "relax_cell": False,
         },
         "ourNEB": {
             "relax_endpoints": True,
@@ -154,13 +156,13 @@ def load_method(config_dict):
     method_name = config_dict["Main"]["method"]
     if method_name is None:
             raise ValueError("Configuration error: 'Main' -> 'method' is not set. Please specify a method (e.g., 'minimization') in config.ini")
-    if method_name.lower() == "neb":
+    if method_name == "NEB":
         from tsearch.nebopt import nebopt as method
-    elif method_name.lower() == "dimer":
+    elif method_name == "Dimer":
         from tsearch.dimeropt import dimeropt as method
-    elif method_name.lower() == "minimization":
+    elif method_name == "Minimization":
         from tsearch.geomopt import geomopt as method
-    elif method_name.lower() == "doubleminimization":
+    elif method_name == "DoubleMinimization":
         from tsearch.geomopt import doublegeomopt as method
     else:
         raise NotImplementedError(
