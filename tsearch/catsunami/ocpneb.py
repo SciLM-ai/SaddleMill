@@ -8,6 +8,66 @@ from fairchem.core.common.utils import setup_imports, setup_logging
 from fairchem.core.datasets.atomic_data import atomicdata_list_to_batch
 
 from ase.mep.neb import DyNEB, NEBState
+from ase.mep.neb import FullSpringMethod, ASENEBMethod, ImprovedTangentMethod, SplineMethod, StringMethod, NEBMethod
+
+
+def get_neb_method(neb, method):
+    if method == 'eb':
+        return FullSpringMethod(neb)
+    elif method == 'aseneb':
+        return ASENEBMethod(neb)
+    elif method == 'improvedtangent':
+        return ImprovedTangentMethod(neb)
+    elif method == 'spline':
+        return SplineMethod(neb)
+    elif method == 'string':
+        return StringMethod(neb)
+    elif method == 'swdneb':
+        return swDNEB(neb)
+    else:
+        raise ValueError(f'Bad method: {method}')
+
+
+class swDNEB(NEBMethod):
+    """
+    Tangent estimates and spring force are according to Eqs. 12-15 in paper IV.
+    """
+
+    def get_tangent(self, state, spring1, spring2, i):
+        energies = state.energies
+        if energies[i + 1] > energies[i] > energies[i - 1]:
+            tangent = spring2.t.copy()
+        elif energies[i + 1] < energies[i] < energies[i - 1]:
+            tangent = spring1.t.copy()
+        else:
+            deltavmax = max(abs(energies[i + 1] - energies[i]),
+                            abs(energies[i - 1] - energies[i]))
+            deltavmin = min(abs(energies[i + 1] - energies[i]),
+                            abs(energies[i - 1] - energies[i]))
+            if energies[i + 1] > energies[i - 1]:
+                tangent = spring2.t * deltavmax + spring1.t * deltavmin
+            else:
+                tangent = spring2.t * deltavmin + spring1.t * deltavmax
+        # Normalize the tangent vector
+        norm = np.linalg.norm(tangent)
+        tangent /= norm if norm > 0 else 1
+        return tangent
+
+    def add_image_force(self, state, tangential_force, tangent, imgforce,
+                        spring1, spring2, i):
+        imgforce -= tangential_force * tangent
+        perp_pot_force = imgforce
+        perp_pot_force_norm = np.linalg.norm(perp_pot_force)
+        perp_pot_force /= perp_pot_force_norm if perp_pot_force_norm > 0 else 1
+
+        # Improved parallel spring force (formula 12 of paper I)
+        imgforce += (spring2.nt * spring2.k - spring1.nt * spring1.k) * tangent
+
+        spring_force = spring2.t * spring2.k - spring1.t * spring1.k
+        perp_spring_force = spring_force - np.vdot(spring_force, tangent) * tangent
+        perp_spring_force_norm = np.linalg.norm(perp_spring_force) or 1
+        sw = 2/np.pi * np.arctan(perp_pot_force_norm**2 / perp_spring_force_norm**2)
+        imgforce += sw * (perp_spring_force - np.vdot(perp_spring_force, perp_pot_force) * perp_pot_force)
 
 
 class OCPNEB(DyNEB):

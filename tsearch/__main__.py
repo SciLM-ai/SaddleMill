@@ -1,5 +1,3 @@
-from executorlib import FluxJobExecutor
-from flux import Flux, resource
 import concurrent.futures
 from contextlib import nullcontext
 from tsearch.tools import parse_inputfile, load_method, \
@@ -30,6 +28,8 @@ def main():
     pathlib.Path(f"{method_name}_debug_zips").mkdir(exist_ok=False)
 
     if config_dict["Main"]["executorlib"]:
+        from executorlib import FluxJobExecutor
+        from flux import Flux, resource
         # Parallel Mode: Using executorlib
         handle = Flux()
         rs = resource.status.ResourceStatusRPC(handle).get()
