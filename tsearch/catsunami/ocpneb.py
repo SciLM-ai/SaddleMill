@@ -8,7 +8,7 @@ from fairchem.core.common.utils import setup_imports, setup_logging
 from fairchem.core.datasets.atomic_data import atomicdata_list_to_batch
 
 from ase.mep.neb import DyNEB, NEBState
-from ase.mep.neb import FullSpringMethod, ASENEBMethod, ImprovedTangentMethod, SplineMethod, StringMethod, NEBMethod
+from ase.mep.neb import NEBMethod
 
 
 class swDNEB(NEBMethod):

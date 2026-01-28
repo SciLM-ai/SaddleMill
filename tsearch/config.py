@@ -28,7 +28,7 @@ class ConfigManager:
         "ourNEB": {
             "relax_endpoints": True,
             "endpoint_relax_fmax": 0.01,
-            "endpoint_relax_maxsteps": 500,
+            "endpoint_relax_steps": 500,
             "interpolate_method": "ase_linear",
             "num_frames": 10,
             "batch_size": 4,
