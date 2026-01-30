@@ -1,5 +1,4 @@
 import concurrent.futures
-import time
 from ase.io import Trajectory
 from itertools import groupby
 from contextlib import nullcontext
@@ -20,16 +19,12 @@ def main():
     print(config_dict,"\n")
 
     method = load_method(config_dict)
-    st = time.time()
     trajes_and_idxs = get_trajes_and_indices(config_dict)
-    print("it took", time.time()-st)
     if config_dict["Main"]["resume"]:
         trajes_and_idxs_old = read_ordered_traj_names()
         if trajes_and_idxs != trajes_and_idxs_old:
             raise ValueError("Provided dirpath creates a different trajes_and_idxs. I can't resume.")
-        print(trajes_and_idxs[:10])
         job_IDs, trajes_and_idxs = get_remaining_trajes(trajes_and_idxs, config_dict)
-        print(trajes_and_idxs[:10])
         clean_up_files()
     else:
         job_IDs = list(range(len(trajes_and_idxs)))

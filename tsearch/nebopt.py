@@ -7,7 +7,6 @@ import traceback
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from pathlib import Path
 import zipfile, os
 import numpy as np
 from ase.data import covalent_radii
