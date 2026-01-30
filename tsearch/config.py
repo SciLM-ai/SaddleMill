@@ -1,5 +1,7 @@
 import configparser
-import os, sys, glob, copy
+import os, glob, copy, pathlib
+import pandas as pd
+from ase.io import Trajectory
 
 class ConfigManager:
     # 1. Define your Safe Defaults here
@@ -13,6 +15,7 @@ class ConfigManager:
             "steps": 1000,
             "Calculator": "FAIRChemCalculator",
             "jobs_per_gpu": 1,
+            "resume": False,
         },
         "FAIRChemCalculator": {
             "device": 'cuda',
@@ -26,6 +29,7 @@ class ConfigManager:
             "relax_cell": False,
         },
         "ourNEB": {
+            "only_endpoints_in_input_traj": False,
             "relax_endpoints": True,
             "endpoint_relax_fmax": 0.01,
             "endpoint_relax_steps": 500,
@@ -189,9 +193,56 @@ def load_optimizer(config_dict):
     return Optimizer
 
 
-def get_all_traj_names(config_dict):
+def get_trajes_and_indices(config_dict):
+    
     main_cfg = config_dict.get("Main", {})
     dir_path = main_cfg.get("dir_path", ".")
     input_pattern = os.path.join(dir_path, "*.traj")
     all_traj_files = sorted(glob.glob(input_pattern))
-    return all_traj_files
+    
+    traj_lens = []
+    for traj_name in all_traj_files:
+        with Trajectory(traj_name, 'r') as traj:
+            traj_lens.append(len(traj))
+    
+    if config_dict["Main"]["Method"] == "NEB":
+        if config_dict["ourNEB"]["only_endpoints_in_input_traj"]:
+            nimages = 2
+        else:
+            nimages = config_dict["ourNEB"]["num_frames"]
+    else:
+        nimages = 1
+
+    trajes_and_idxs = []
+    for traj_name, traj_len in zip(all_traj_files,traj_lens):
+        if traj_len%nimages != 0: raise ValueError(f"Can't divide a traj file with {traj_len} atoms objects into batches of {nimages} atoms objects")
+        for i in range(traj_len//nimages):
+            trajes_and_idxs.append([traj_name, i*nimages, (i+1)*nimages])
+    
+    return trajes_and_idxs
+
+
+def create_results_directories(config_dict):
+    method_name = config_dict["Main"]["method"]
+    pathlib.Path(f"{method_name}_status_csvs").mkdir(exist_ok=False)
+    pathlib.Path(f"{method_name}_trajes").mkdir(exist_ok=False)
+    pathlib.Path(f"{method_name}_debug_zips").mkdir(exist_ok=False)
+
+
+def get_previous_job_status_df(config_dict):
+    file_list = glob.glob(os.path.join(f"{config_dict["Main"]["method"]}_status_csvs/", "*.csv"))
+    dfs = [pd.read_csv(f, header=None) for f in file_list]
+    status_df = pd.concat(dfs, ignore_index=True)
+    return status_df
+
+
+def filter_trajectories(trajes_and_idxs, status_df):
+    successful_jobs = status_df[status_df.iloc[:, -1] != "error"]
+    ids_to_skip = set(successful_jobs.iloc[:, 0])
+    return [item for i, item in enumerate(trajes_and_idxs) if i not in ids_to_skip]
+
+
+def get_remaining_trajes(trajes_and_idxs, config_dict):
+    status_df = get_previous_job_status_df(config_dict)
+    trajes_and_idxs = filter_trajectories(trajes_and_idxs, status_df)
+    return trajes_and_idxs

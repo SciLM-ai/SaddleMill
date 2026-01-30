@@ -1,9 +1,9 @@
 import concurrent.futures
-from contextlib import nullcontext
-from tsearch.tools import save_ordered_traj_names
-from tsearch.config import load_config, load_method, get_all_traj_names
-import os, pathlib
 from ase.io import Trajectory
+from itertools import groupby
+from contextlib import nullcontext
+from tsearch.tools import save_ordered_traj_names, clean_up_files
+from tsearch.config import load_config, load_method, get_trajes_and_indices, create_results_directories, get_remaining_trajes
 
 
 def check_and_print_status(futures, total):
@@ -16,23 +16,24 @@ def check_and_print_status(futures, total):
 def main():
 
     config_dict = load_config("config.ini")
-    print(config_dict)
-    print()
+    print(config_dict,"\n")
 
     method = load_method(config_dict)
-    all_traj_files = get_all_traj_names(config_dict)
-    save_ordered_traj_names(all_traj_files)
-
-    # create results directories: status_csvs, trajes, debug_zips
-    method_name = config_dict["Main"]["method"]
-    pathlib.Path(f"{method_name}_status_csvs").mkdir(exist_ok=False)
-    pathlib.Path(f"{method_name}_trajes").mkdir(exist_ok=False)
-    pathlib.Path(f"{method_name}_debug_zips").mkdir(exist_ok=False)
+    trajes_and_idxs = get_trajes_and_indices(config_dict)
+    if config_dict["Main"]["resume"]:
+        # trajes_and_idxs_old = read_ordered_traj_names()
+        # if trajes_and_idxs != trajes_and_idxs_old:
+        #     raise ValueError("Provided dirpath creates a different trajes_and_idxs. I can't resume.")
+        trajes_and_idxs = get_remaining_trajes(trajes_and_idxs)
+        clean_up_files()
+    else:
+        create_results_directories(config_dict)
+        save_ordered_traj_names(trajes_and_idxs)
 
     if config_dict["Main"]["executorlib"]:
         from executorlib import FluxJobExecutor
         from flux import Flux, resource
-        # Parallel Mode: Using executorlib
+
         handle = Flux()
         rs = resource.status.ResourceStatusRPC(handle).get()
         rl = resource.list.resource_list(handle).get()
@@ -44,7 +45,6 @@ def main():
         gpus_per_core = 1 if jobs_per_gpu == 1 else 0
         cpus_per_job = all_ncores // (all_ngpus*jobs_per_gpu) - 1
 
-        # Use FluxJobExecutor and its submit method
         executor = FluxJobExecutor(
             flux_log_files=True,
             max_workers=all_ngpus * jobs_per_gpu,
@@ -71,17 +71,14 @@ def main():
         futures = []
         submit_counter = 0
 
-        for traj_name in all_traj_files:
-            if method_name == "NEB":
-                f = submitter(method, submit_counter, config_dict, traj_name)
+        for traj_name, group in groupby(trajes_and_idxs, key=lambda x: x[0]):
+            traj = Trajectory(traj_name, 'r')
+            for _, i, j in group:
+                images = traj[i:j].copy()
+                f = submitter(method, submit_counter, config_dict, images)
                 if config_dict["Main"]["executorlib"]: futures.append(f)
                 submit_counter += 1
-            else:
-                with Trajectory(traj_name, 'r') as traj:
-                    for atoms in traj:
-                        f = submitter(method, submit_counter, config_dict, atoms)
-                        if config_dict["Main"]["executorlib"]: futures.append(f)
-                        submit_counter += 1
+            traj.close()
 
         if config_dict["Main"]["executorlib"]:
             while len(futures):

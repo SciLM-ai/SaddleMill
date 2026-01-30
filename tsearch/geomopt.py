@@ -1,6 +1,7 @@
 import sys, os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
+import traceback
 import zipfile
 from ase.io import Trajectory
 from ase.filters import FrechetCellFilter
@@ -69,6 +70,7 @@ def geomopt(i, config_dict, atoms, executorlib_worker_id=None):
 
         except Exception as e:
             print(f"Rank {rank} FAILED on structure {i}: {e}")
+            print(f"\nTraceback details:\n{traceback.format_exc()}")
             existing_files = [f for f in temp_files if os.path.exists(f)]
             if existing_files:
                 with zipfile.ZipFile(zip_name, 'a', zipfile.ZIP_DEFLATED) as zf:
@@ -190,6 +192,7 @@ def doublegeomopt(i, config_dict, atoms, executorlib_worker_id=None):
         except Exception as e:
             # --- CLEANUP (Error Case) ---
             print(f"Rank {rank} FAILED on structure {i}: {e}")
+            print(f"\nTraceback details:\n{traceback.format_exc()}")
             log_status(parent_source_idx, f"error: {str(e)}")
             
             existing_files = [f for f in temp_files if os.path.exists(f)]

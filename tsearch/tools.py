@@ -1,14 +1,25 @@
 import numpy as np
+import json, os
 from ase.neighborlist import neighbor_list, natural_cutoffs
 
 
 #==============================================================================
 ### FILE IO
 
-def save_ordered_traj_names(all_traj_files):
-    with open('traj_files_ordered.txt', 'w') as f:
-        for name in all_traj_files:
-            f.write(f"{name}\n")
+def save_ordered_traj_names(trajes_and_idxs):
+    with open('traj_files_ordered.json', 'w') as f:
+        json.dump(trajes_and_idxs, f)
+
+
+def read_ordered_traj_names():
+    with open('traj_files_ordered.json', 'r') as f:
+        trajes_and_idxs = json.load(f)
+    return trajes_and_idxs
+
+
+def clean_up_files():
+    os.system("rm -rf your_neb_*.traj reactant_relaxation_*.traj product_relaxation_*.traj neb_*.log flux* diffusion_barrier_*.png error")
+    
 
 #==============================================================================
 ### BOND-BREAKING/FORMING DETECTION

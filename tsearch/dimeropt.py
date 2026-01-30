@@ -1,7 +1,7 @@
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-import io
+import traceback
 import random
 import zipfile
 import numpy as np
@@ -151,6 +151,7 @@ def dimeropt(i, config_dict, atoms_orig, executorlib_worker_id=None):
 
         except Exception as e:
             print(f"Rank {rank} FAILED on structure {i}: {e}")
+            print(f"\nTraceback details:\n{traceback.format_exc()}")
             existing_files = [f for f in temp_files if os.path.exists(f)]
             if existing_files:
                 with zipfile.ZipFile(zip_name, 'a', zipfile.ZIP_DEFLATED) as zf:
