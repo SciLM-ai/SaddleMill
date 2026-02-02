@@ -55,6 +55,7 @@ def get_bond_set(atoms, cutoffs, tag_filter=None):
             
     return bonds
 
+
 def check_reaction(atoms_initial, atoms_final, neighbor_fudge=1.25):
     """
     Compares connectivity of two structures.
@@ -75,14 +76,13 @@ def check_reaction(atoms_initial, atoms_final, neighbor_fudge=1.25):
     
     reaction_occurred = len(broken) > 0 or len(formed) > 0
     
-    #return {
-    #    "occurred": reaction_occurred,
-    #    "broken_bonds": broken,
-    #    "formed_bonds": formed,
-    #    "n_broken": len(broken),
-    #    "n_formed": len(formed)
-    #}
-    return reaction_occurred
+    return {
+        "occurred": reaction_occurred,
+        "broken_bonds": broken,
+        "formed_bonds": formed,
+        "n_broken": len(broken),
+        "n_formed": len(formed)
+    }
 
 def check_adsorbate_reaction(atoms_initial, atoms_final, neighbor_fudge=1.25, target_tag=2):
     """
@@ -99,12 +99,13 @@ def check_adsorbate_reaction(atoms_initial, atoms_final, neighbor_fudge=1.25, ta
     broken = bonds_ini - bonds_fin
     formed = bonds_fin - bonds_ini
     
-    #return {
-    #    "occurred": len(broken) > 0 or len(formed) > 0,
-    #    "broken_bonds": broken,
-    #    "formed_bonds": formed
-    #}
-    return (len(broken) > 0 or len(formed) > 0)
+    return {
+        "occurred": len(broken) > 0 or len(formed) > 0,
+        "broken_bonds": broken,
+        "formed_bonds": formed,
+        "n_broken": len(broken),
+        "n_formed": len(formed)
+    }
 
 #==============================================================================
 

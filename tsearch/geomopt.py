@@ -84,6 +84,7 @@ def geomopt(i, config_dict, atoms, executorlib_worker_id=None):
 def doublegeomopt(i, config_dict, atoms, executorlib_worker_id=None):
     
     rank = executorlib_worker_id
+    atoms = atoms[0]
     atoms.calc = calc
 
     method_name = config_dict["Main"]["method"]
@@ -163,15 +164,32 @@ def doublegeomopt(i, config_dict, atoms, executorlib_worker_id=None):
 
             # --- CHECK REACTION ---
             neighbor_fudge = 1.25
-            is_reaction = check_reaction(min1, min2, neighbor_fudge=neighbor_fudge)
-            is_ads_reaction = check_adsorbate_reaction(min1, min2, neighbor_fudge=neighbor_fudge,
-                                     target_tag=2)
+            is_reaction, broken_bonds, formed_bonds, n_broken, n_formed = \
+                    check_reaction(min1, min2, neighbor_fudge=neighbor_fudge).values()
+            is_ads_reaction, ads_broken_bonds, ads_formed_bonds, ads_n_broken, ads_n_formed = \
+                    check_adsorbate_reaction(min1, min2, neighbor_fudge=neighbor_fudge,
+                                             target_tag=2).values()
             min1.info['is_reaction'] = is_reaction
+            min1.info['n_formed_bonds'] = n_formed
+            min1.info['n_broken_bonds'] = n_broken
             min1.info['is_ads_reaction'] = is_ads_reaction
+            min1.info['n_ads_formed_bonds'] = ads_n_formed
+            min1.info['n_ads_broken_bonds'] = ads_n_broken
+
             min2.info['is_reaction'] = is_reaction
+            min2.info['n_formed_bonds'] = n_formed
+            min2.info['n_broken_bonds'] = n_broken
             min2.info['is_ads_reaction'] = is_ads_reaction
+            min2.info['n_ads_formed_bonds'] = ads_n_formed
+            min2.info['n_ads_broken_bonds'] = ads_n_broken
+
             ts_atoms.info['is_reaction'] = is_reaction
+            ts_atoms.info['n_formed_bonds'] = n_formed
+            ts_atoms.info['n_broken_bonds'] = n_broken
             ts_atoms.info['is_ads_reaction'] = is_ads_reaction
+            ts_atoms.info['n_ads_formed_bonds'] = ads_n_formed
+            ts_atoms.info['n_ads_broken_bonds'] = ads_n_broken
+
 
             # --- WRITE TRIPLET (Min1 -> TS -> Min2) ---
             writer.write(min1)
