@@ -203,7 +203,7 @@ def doublegeomopt(i, config_dict, atoms, executorlib_worker_id=None):
             writer.write(ts_atoms)
             writer.write(min2)
             
-            log_status(parent_source_idx, "done")
+            log_status(parent_source_idx, int(conv1 and conv2))
 
             # --- CLEANUP (Success Case) ---
             existing_files = [f for f in temp_files if os.path.exists(f)]
