@@ -1,7 +1,9 @@
+import sys
 import numpy as np
 import random
 from ase.io import Trajectory
 from ase.build import make_supercell
+
 
 def get_variants(atoms):
     w_ion = atoms.info['working_ion']
@@ -31,6 +33,7 @@ def get_variants(atoms):
         variants.append(new_atoms)
     
     return variants
+
 
 def process_structure(atoms_orig, old_w_ion):
     w_ion = atoms_orig.info['working_ion']
@@ -119,14 +122,14 @@ def process_structure(atoms_orig, old_w_ion):
             traj_out.write(img1)
             traj_out.write(img2)
 
-# Main Execution
-traj_reader = Trajectory('../../MP_batteries_fully_ionated_structures.traj', 'r')  #XXX: hard coded?
 
-count = 0
-for atoms in traj_reader:
-    print(count)
-    variants = get_variants(atoms)
-    orig_ion = atoms.info['working_ion']
-    for var in variants:
-        process_structure(var, orig_ion)
-    count += 1
+if __name__ == "__main__":
+    traj_path = sys.argv[1]
+    traj_reader = Trajectory(traj_path, 'r')
+
+    for i, atoms in enumerate(traj_reader):
+        print(i)
+        variants = get_variants(atoms)
+        orig_ion = atoms.info['working_ion']
+        for var in variants:
+            process_structure(var, orig_ion)

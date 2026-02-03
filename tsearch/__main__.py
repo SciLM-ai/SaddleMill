@@ -75,7 +75,7 @@ def main():
         for traj_name, group in groupby(trajes_and_idxs, key=lambda x: x[0]):
             traj = Trajectory(traj_name, 'r')
             for _, i, j in group:
-                images = list(traj[i:j])
+                images = list(traj[i:j]) if j!=i+1 else traj[i]
                 try:
                     f = submitter(method, job_IDs[idx], config_dict, images)
                     if config_dict["Main"]["executorlib"]: 

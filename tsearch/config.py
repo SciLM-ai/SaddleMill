@@ -220,7 +220,7 @@ def get_trajes_and_indices(config_dict):
         if config_dict["ourNEB"]["images_location_in_input_traj"] == 0:
             trajes_and_idxs.append([traj_name, 0, nimages])
         elif config_dict["ourNEB"]["images_location_in_input_traj"] == -1:
-            trajes_and_idxs.append([traj_name, -nimages, 0])
+            trajes_and_idxs.append([traj_name, traj_lens[i]-nimages, traj_lens[i]])
         elif config_dict["ourNEB"]["images_location_in_input_traj"] == ":":
             traj_len = traj_lens[i]
             if traj_len%nimages != 0: raise ValueError(f"Can't divide a traj file with {traj_len} atoms objects into batches of {nimages} atoms objects")
