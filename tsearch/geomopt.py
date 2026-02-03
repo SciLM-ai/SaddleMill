@@ -164,11 +164,19 @@ def doublegeomopt(i, config_dict, atoms, executorlib_worker_id=None):
 
             # --- CHECK REACTION ---
             neighbor_fudge = 1.25
-            is_reaction, broken_bonds, formed_bonds, n_broken, n_formed = \
-                    check_reaction(min1, min2, neighbor_fudge=neighbor_fudge).values()
-            is_ads_reaction, ads_broken_bonds, ads_formed_bonds, ads_n_broken, ads_n_formed = \
-                    check_adsorbate_reaction(min1, min2, neighbor_fudge=neighbor_fudge,
-                                             target_tag=2).values()
+            res  = check_reaction(min1, min2, neighbor_fudge=neighbor_fudge)
+            is_reaction = res["occurred"]
+            broken_bonds = res["broken_bonds"]
+            formed_bonds = res["formed_bonds"]
+            n_broken = res["n_broken"]
+            n_formed = res["n_formed"]
+            res = check_adsorbate_reaction(min1, min2, neighbor_fudge=neighbor_fudge,
+                                           target_tag=2)
+            is_ads_reaction = res["occurred"]
+            ads_broken_bonds = res["broken_bonds"]
+            ads_formed_bonds = res["formed_bonds"]
+            ads_n_broken = res["n_broken"]
+            ads_n_formed = res["n_formed"]
             min1.info['is_reaction'] = is_reaction
             min1.info['n_formed_bonds'] = n_formed
             min1.info['n_broken_bonds'] = n_broken

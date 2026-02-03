@@ -95,7 +95,9 @@ def process_structure(atoms_orig, old_w_ion):
             idx_B -= sum(1 for x in to_remove if x < idx_B)
             
             # Delete in reverse sorted order to preserve indices during deletion
-            del atoms[sorted(to_remove, reverse=True)]
+            #del atoms[sorted(to_remove, reverse=True)]
+            for index in sorted(to_remove, reverse=True):
+                del atoms[index]
 
         # Create base structure with A removed
         del atoms[idx_A]
@@ -118,7 +120,7 @@ def process_structure(atoms_orig, old_w_ion):
             traj_out.write(img2)
 
 # Main Execution
-traj_reader = Trajectory('../../MP_batteries_fully_ionated_structures.traj', 'r')
+traj_reader = Trajectory('../../MP_batteries_fully_ionated_structures.traj', 'r')  #XXX: hard coded?
 
 count = 0
 for atoms in traj_reader:
