@@ -238,7 +238,7 @@ def create_results_directories(config_dict):
 
 
 def get_previous_job_status_df(config_dict):
-    file_list = glob.glob(os.path.join(f"{config_dict["Main"]["method"]}_status_csvs/", "*.csv"))
+    file_list = glob.glob(os.path.join(f"{config_dict['Main']['method']}_status_csvs/", "*.csv"))
     dfs = [pd.read_csv(f, header=None) for f in file_list]
     status_df = pd.concat(dfs, ignore_index=True)
     return status_df
