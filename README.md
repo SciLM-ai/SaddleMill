@@ -1,8 +1,10 @@
 # tsearch
 
-## Installation on Lonestar6
+## Installation
 
 ### 1. Base Environment Setup
+
+#### *Lonestar6 (TACC)*
 
 Load necessary modules and create the base Conda environment.
 
@@ -21,9 +23,7 @@ find $CONDA_PREFIX -name "sched-fluxion-*.so" -path "*feedstock_root*" -exec cp 
 
 ```
 
-## Installation on Vista
-
-### 1. Base Environment Setup
+#### *Vista (TACC)*
 
 Load necessary modules and create the base Conda environment.
 
@@ -47,11 +47,61 @@ MPICC=$(which mpicc) pip install --no-binary=mpi4py mpi4py
 
 ```
 
+#### *Perlmutter (NERSC)*
+
+Necessary modules (should be loaded by default):
+* `PrgEnv-gnu/8.5.0` (Compiler Suite)
+* `cudatoolkit/12.4` (System CUDA headers)
+* `craype-accel-nvidia80` (Links MPI to A100 GPUs)
+* `cray-mpich/8.1.30` (High-Speed Network Library)
+* `python/3.11` (System Python)
+* `conda/Miniforge3-24.7.1-0` (Access to mamba)
+
+Other modules (should be loaded by default):
+* `craype-x86-milan`
+* `libfabric/1.22.0`
+* `craype-network-ofi`
+* `xpmem/2.9.7...`
+* `cray-dsmml/0.3.0 `
+* `cray-libsci/24.07.0`
+* `craype/2.7.32`
+* `gcc-native/13.2`
+* `perftools-base/24.07.0`
+* `cpe/24.07`
+* `gpu/1.0`
+* `sqs/2.0`
+* `darshan/default`
+
+Create base environment:
+
+```bash
+# set mamba cache at scratch
+mamba config --set pkgs_dirs $SCRATCH/.cache/conda
+
+# Enter idev to get a GPU node
+salloc --nodes 1 --qos interactive --time 04:00:00 --constraint gpu --gpus 4 --account m1883_g
+
+# Create base environment in CFS
+mamba create -p /global/cfs/cdirs/m5144/sung/envs/executorlib -c conda-forge python=3.12 \
+  flux-core flux-sched executorlib "libhwloc=*=cuda*"  # warnings about cuda, ucx, nccl, etc. are ok
+conda activate executorlib
+
+```
+
+**(Optional) MPI Support:**
+If `mpi4py` is required, use the following to compile it from source with Cray wrappers (experimental):
+
+```bash
+MPICC="cc -shared" pip install --force-reinstall --no-cache-dir --no-binary=mpi4py mpi4py
+
+```
+
 ### 2. Verify Flux Resources
 
 Check if flux detects all resources correctly:
 
 ```bash
+# For Vista and Perlmutter
 srun -n 2 flux start flux resource list
 # For LS6
 srun -n 2 --mpi=pmi2 flux start flux resource list
@@ -65,11 +115,12 @@ Clone the environment and install specific machine learning libraries.
 ```bash
 conda create --prefix /work/08405/ilgar/vista/conda_libraries/tsearch --clone executorlib
 
-pip config set global.cache-dir "/path/to/your/cache/directory"
+pip config set global.cache-dir "/path/to/your/cache/directory"  # like $SCRATCH/.cache/pip
 
 pip install fairchem-core fairchem-data-oc
 pip install scipy==1.16
-# This part below is only necessary for Vista and not for Lonestar6
+
+# This part below is only necessary for Vista (not for Lonestar6 or Perlmutter)
 pip uninstall torch
 pip install "torch==2.9.0+cu128" --index-url https://download.pytorch.org/whl/cu128
 
@@ -100,6 +151,7 @@ Add these to your `.bashrc` or run before execution to manage cache and paths:
 ```bash
 # Move cache to scratch to save home directory space
 export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
+export PYTHONPATH=<tsearch_path>:$PYTHONPATH
 
 ```
 
@@ -123,14 +175,27 @@ Ensure you run these commands (or add to `.bashrc`) every time you log in or sta
 ```bash
 # On Vista:
 export PYTHONPATH=<tsearch_path>:$PYTHONPATH
-export LD_LIBRARY_PATH=/opt/apps/cuda/12.4/targets/sbsa-linux/lib/:$LD_LIBRARY_PATH
 export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
+export LD_LIBRARY_PATH=/opt/apps/cuda/12.4/targets/sbsa-linux/lib/:$LD_LIBRARY_PATH
+
 
 # On LS6:
 export PYTHONPATH=<tsearch_path>:$PYTHONPATH
+export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
 module unload impi python3
 module load cuda/12.8
-export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
 
+
+# On Perlmutter
+export PYTHONPATH=<tsearch_path>:$PYTHONPATH
+export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
+# --- START: FIX LIBRARY PATHS ---
+export PY_SITE_PKGS=$(python -c "import site; print(site.getsitepackages()[0])")
+export NVIDIA_DIR="${PY_SITE_PKGS}/nvidia"
+# Prepend ALL Nvidia libraries to the load path
+for lib in cuda_runtime nvjitlink cusparse cublas cufft cudnn curand cusolver nccl; do
+  export LD_LIBRARY_PATH="${NVIDIA_DIR}/${lib}/lib:${LD_LIBRARY_PATH}"
+done
+# --- END: FIX LIBRARY PATHS ---
 
 ```
