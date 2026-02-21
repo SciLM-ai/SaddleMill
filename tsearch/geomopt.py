@@ -1,35 +1,10 @@
-import sys, os
+import os
 import traceback
 import zipfile
 from ase.io import Trajectory
 from ase.filters import FrechetCellFilter
 from ase.calculators.singlepoint import SinglePointCalculator
-from tsearch.config import load_config, load_calculator, load_optimizer
 from tsearch.tools import check_reaction, check_adsorbate_reaction
-
-
-def opt_init_function(executorlib_worker_id=None):
-    # from flux import Flux, resource
-    config_dict = load_config("config.ini")
-    # handle = Flux()
-    # rset = resource.list.resource_list(handle).get().all
-    # node_ngpus_list = [[str(rset.copy_ranks(str(i)).nodelist), rset.copy_ranks(str(i)).ngpus] for i in range(rset.nnodes)]
-    # gpu_ID = executorlib_worker_id
-
-    # for i in range(len(node_ngpus_list)):
-    #     node, ngpus = node_ngpus_list[i]
-    #     if gpu_ID < config_dict['Main']['jobs_per_gpu']*ngpus:
-    #         print(f"Worker {executorlib_worker_id} assigned to GPU {gpu_ID} on node {node} with {ngpus} GPUs.")
-    #         break
-    #     else:
-    #         gpu_ID -= config_dict['Main']['jobs_per_gpu']*ngpus
-    # os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_ID%ngpus)
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(executorlib_worker_id%4)
-
-    calc = load_calculator(config_dict)
-    Optimizer = load_optimizer(config_dict)
-
-    return {"calc": calc, "Optimizer": Optimizer}
 
 
 def relax_structure(config_dict, optimizable, logfile, trajfile, Optimizer):

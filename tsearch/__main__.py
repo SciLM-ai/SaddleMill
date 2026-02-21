@@ -2,8 +2,9 @@ import concurrent.futures
 from ase.io import Trajectory
 from itertools import groupby
 from contextlib import nullcontext
+from tsearch.init_function import init_function
 from tsearch.tools import save_ordered_traj_names, read_ordered_traj_names, clean_up_files
-from tsearch.config import load_config, load_method, load_init_function, get_trajes_and_indices, create_results_directories, get_remaining_trajes
+from tsearch.config import load_config, load_method, get_trajes_and_indices, create_results_directories, get_remaining_trajes
 
 
 def check_and_print_status(futures, total):
@@ -19,7 +20,6 @@ def main():
     print(config_dict,"\n")
 
     method = load_method(config_dict)
-    init_function = load_init_function(config_dict)
     trajes_and_idxs = get_trajes_and_indices(config_dict)
     if config_dict["Main"]["resume"]:
         trajes_and_idxs_old = read_ordered_traj_names()
@@ -64,9 +64,10 @@ def main():
         get_submitter = lambda exe: exe.submit
     else:
         # Serial Mode: Use empty context and a dummy submitter that runs immediately
+        init_data = init_function()
         executor = nullcontext()
-        # 'exe' will be None; we ignore it and run the function directly
-        get_submitter = lambda _: lambda fn, *args: fn(*args)
+        get_submitter = lambda _: lambda fn, *args, **kwargs: fn(*args, **init_data, **kwargs)
+
 
     # 2. Unified Execution Loop
     with executor as exe:

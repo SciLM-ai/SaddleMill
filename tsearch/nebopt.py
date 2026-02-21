@@ -1,8 +1,4 @@
 import os
-from tsearch.config import load_config, load_calculator, load_optimizer
-config_dict = load_config("config.ini")
-if config_dict["Main"]["jobs_per_gpu"] != 1: os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-
 import traceback
 import matplotlib
 matplotlib.use('Agg')
@@ -16,11 +12,7 @@ from ase.mep.neb import NEB, NEBTools, NEBState
 from tsearch.catsunami.ocpneb import OCPNEB
 
 
-calc = load_calculator(config_dict)
-Optimizer = load_optimizer(config_dict)
-
-
-def nebopt(i, config_dict, images, executorlib_worker_id=None):
+def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
 
     rank = executorlib_worker_id
     zip_name = f"{config_dict['Main']['method']}_debug_zips/structure_rank_{rank}_data.zip"

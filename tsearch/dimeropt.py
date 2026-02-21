@@ -1,6 +1,4 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-
 import traceback
 import random
 import zipfile
@@ -12,19 +10,14 @@ from ase.neighborlist import natural_cutoffs, neighbor_list
 from ase.io import Trajectory
 from ase.mep import DimerControl, MinModeAtoms, MinModeTranslate
 from ase.calculators.singlepoint import SinglePointCalculator
-from tsearch.config import load_config, load_calculator
 from tsearch.dimertools.structure_edit import get_attempts
-
-
-config_dict = load_config("config.ini")
-calc = load_calculator(config_dict)
 
 
 class StopRun(Exception):
     pass
 
 
-def dimeropt(i, config_dict, atoms_orig, executorlib_worker_id=None):
+def dimeropt(i, config_dict, atoms_orig, calc, executorlib_worker_id=None, **kwargs):
 
     rank = executorlib_worker_id
     random.seed(i)
