@@ -129,6 +129,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, executorlib_worker_id=None, **kwa
                 atoms.info['attempt_id'] = attempt
                 atoms.info['stoprun'] = 1 if stopped_early else 0
                 atoms.info['selected_index'] = slctd_indx
+                atoms.info['reaction_type'] = atoms.info.get('reaction_type', 'unknown')
                 atoms.wrap()
 
                 writer.write(atoms)

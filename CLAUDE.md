@@ -65,9 +65,31 @@ catsunami/ocpneb.py  (OCPNEB: batched NEB with swDNEB switching)
 
 ### `dimeropt.py` - Dimer Method
 - Generates displacement candidates via `dimertools/structure_edit.py`
-- Supports `bulk` (random supercell vacancies) and `oc` (adsorbate-targeted) modes
+- Supports `bulk` (multiple reaction types, see below) and `oc` (adsorbate-targeted) modes
 - Convergence checks every 5 steps: participation ratio (delocalization) and desorption detection
 - Extension check if initial convergence fails
+- Writes `reaction_type` to `atoms.info` for each attempt
+
+### `dimertools/structure_edit.py` - Bulk Reaction Types for Dimer
+Bulk dimer mode supports 7 reaction types, configured via `reaction_types` (space-separated list):
+
+| Type | Function | Description | Atoms displaced |
+|------|----------|-------------|-----------------|
+| `vacancy` | `get_vacancy_attempts()` | Remove atom, neighbor hops into vacancy | 1 (center-based) |
+| `hop_reuse` | `get_hop_reuse_attempts()` | Existing atom relocated to interstitial site | 1 (vector) |
+| `hop_insert` | `get_hop_insert_attempts()` | New small atom (H/C/N/O/B) inserted at interstitial site | 1 (vector) |
+| `kickout_reuse` | `get_kickout_reuse_attempts()` | Existing atom placed at interstitial, kicks nearest lattice atom into another interstitial | 2 (vector) |
+| `kickout_insert` | `get_kickout_insert_attempts()` | New similar-sized atom inserted at interstitial, kicks nearest lattice atom | 2 (vector) |
+| `exchange` | `get_exchange_attempts()` | Two neighboring atoms swap positions directly | 2 (vector) |
+| `ring` | `get_ring_attempts()` | Ring of 3+ atoms rotate cooperatively; size randomly sampled from `ring_sizes` config | N (vector) |
+
+**Key infrastructure:**
+- `find_interstitial_sites(atoms)`: Voronoi tessellation on 3x3x3 periodic images → filter by min distance from atoms → cluster within 0.5 Å. Uses `scipy.spatial.Voronoi` and `scipy.cluster.hierarchy`.
+- `_mic_vector()` / `_nearest_site()`: Minimum image convention helpers for periodic distance calculations.
+- `_find_ring(neighbors_dict, seed, ring_size)`: Finds closed rings of connected atoms in the neighbor graph via constrained random walk. Used by both `exchange` (ring_size=2) and `ring` (ring_size>=3) via shared `_get_ring_swap_attempts()` core function.
+- Element sampling: `hop_insert` uses small atoms weighted by 1/covalent_radius (H heavily favored). `kickout_insert` uses Gaussian weight centered on host avg covalent radius (σ=0.2 Å) from a pool of 30 common metals/semiconductors.
+- Dispatch: `_REACTION_TYPE_DISPATCH` dict maps type names to functions. `get_attempts()` iterates over configured types.
+- Backward compatible: default `reaction_types = vacancy` reproduces original behavior exactly.
 
 ### `geomopt.py` - Geometry Optimization
 - `geomopt()`: Standard relaxation with optional cell relaxation (FrechetCellFilter)
@@ -139,8 +161,13 @@ dynamic_relaxation = False   # Skip converged images during optimization
 
 [ourDimer]
 dataset_type = oc            # oc | bulk
-num_attempts = 3
+num_attempts = 3             # Used for oc mode attempt count
+reaction_types = vacancy     # Space-separated: vacancy hop_reuse hop_insert kickout_reuse kickout_insert exchange ring
+num_attempts_per_type = 1    # Attempts per reaction type (bulk mode); total = len(types) * num_per_type
+ring_sizes = 3 4             # Ring sizes to sample from for 'ring' reaction type
 delocalization_threshold = 0.8
+extension_check_fmax = 0.4
+extension_check_curvature = -0.2
 
 [ourMinimization]
 relax_cell = False
@@ -165,6 +192,7 @@ Each TS image in the output trajectory contains:
 - `max_forces`: Max forces on each image
 - `converged`: 1 or 0
 - `reactant_positions` / `product_positions`
+- `reaction_type`: (Dimer only) vacancy, hop_reuse, hop_insert, kickout_reuse, kickout_insert, exchange, ring, or unknown
 
 ## Execution Modes
 

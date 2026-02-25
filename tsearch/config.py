@@ -44,6 +44,9 @@ class ConfigManager:
         "ourDimer": {
             "dataset_type": None,
             "num_attempts": 3,
+            "reaction_types": None, # Could be these if dataset_type is "bulk": vacancy hop_reuse hop_insert kickout_reuse kickout_insert exchange ring
+            "num_attempts_per_type": 1,
+            "ring_sizes": "3 4",
             "delocalization_threshold": 0.8,
             "extension_check_fmax": 0.4,
             "extension_check_curvature": -0.2,
