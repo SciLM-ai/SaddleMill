@@ -48,7 +48,12 @@ def dimeropt(i, config_dict, atoms_orig, calc, executorlib_worker_id=None, **kwa
                 temp_files = [temp_log, temp_opt_log, temp_traj]
 
                 atoms.calc = calc
-                free_indices = [atom.index for atom in atoms if atom.index not in atoms.constraints[0].get_indices()]
+
+                # Handle constraints:
+                if atoms.constraints:
+                    free_indices = [atom.index for atom in atoms if atom.index not in atoms.constraints[0].get_indices()]
+                else:
+                    free_indices = [atom.index for atom in atoms]
 
                 d_control = DimerControl(
                     logfile = temp_log,
