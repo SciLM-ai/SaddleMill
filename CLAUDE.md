@@ -129,7 +129,7 @@ zip = True                  # Compress debug files
 
 [FAIRChemCalculator]
 device = cuda
-model_name_or_path = uma-s-1p1   # Model checkpoint
+name_or_path = uma-s-1p1   # Model checkpoint
 task_name = oc20                  # Task type
 
 [MDMin]

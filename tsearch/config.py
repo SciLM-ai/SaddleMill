@@ -20,7 +20,7 @@ class ConfigManager:
         },
         "FAIRChemCalculator": {
             "device": 'cuda',
-            "model_name_or_path": 'uma-s-1p1',
+            "name_or_path": 'uma-s-1p1',
             "task_name": None,  # requires user input
         },
         "ourMinimization": {
@@ -83,34 +83,29 @@ class ConfigManager:
         Recursively interprets strings into bools, numbers, or lists.
         Matches logic of original `interpret_string`.
         """
-        # 1. Strip whitespace
         if isinstance(val, str):
             val = val.strip()
 
-        # 2. Boolean check
-        if val.lower() == 'true': return True
-        if val.lower() == 'false': return False
+            if len(val) >= 2 and val[0] in ("'", '"') and val[-1] == val[0]:
+                return val[1:-1]
 
-        # 3. Integer check
+        if str(val).lower() == 'true': return True
+        if str(val).lower() == 'false': return False
+
         try:
             return int(val)
         except ValueError:
             pass
 
-        # 4. Float check
         try:
             return float(val)
         except ValueError:
             pass
 
-        # 5. List check (Space-delimited)
-        # Only split if it looks like a list of values (contains space)
-        if ' ' in val:
+        if isinstance(val, str) and ' ' in val:
             parts = val.split()
-            # Recursively interpret each part
             return [self._parse_value(p) for p in parts]
 
-        # 6. Fallback: Return original string
         return val
 
     def __getitem__(self, key):
@@ -137,10 +132,10 @@ class ConfigManager:
         return self._config
 
     def __str__(self):
-            """Enables pretty printing via print(config)"""
-            import json
-            # default=str handles objects that aren't natively JSON serializable
-            return json.dumps(self._config, indent=4, default=str)
+        """Enables pretty printing via print(config)"""
+        import json
+        # default=str handles objects that aren't natively JSON serializable
+        return json.dumps(self._config, indent=4, default=str)
 
 # --- Helper function to mimic your old parse_inputfile ---
 def load_config(path="config.ini"):
@@ -148,17 +143,23 @@ def load_config(path="config.ini"):
 
 
 def load_calculator(config_dict):
-    if config_dict["Main"]["Calculator"] == "FAIRChemCalculator":
+    calculator_name = config_dict["Main"]["Calculator"]
+    if calculator_name == "FAIRChemCalculator":
         from fairchem.core import FAIRChemCalculator
-        calc = FAIRChemCalculator.from_model_checkpoint(
-            config_dict["FAIRChemCalculator"]["model_name_or_path"],
-            task_name = config_dict["FAIRChemCalculator"]["task_name"],
-            device = config_dict["FAIRChemCalculator"]["device"],
-            )
-    elif config_dict["Main"]["Calculator"] == "VaspInteractive":
-        raise NotImplementedError
-    elif config_dict["Main"]["Calculator"] == "Vasp":
-        raise NotImplementedError
+        calc = FAIRChemCalculator.from_model_checkpoint
+    elif calculator_name == "VaspInteractive":
+        from vasp_interactive import VaspInteractive as calc
+    elif calculator_name == "Vasp":
+        from ase.calculators.vasp import Vasp as calc
+
+    # To-do: implement this for Omat24 level DFT:
+    # from fairchem.data.omat.vasp.sets import OMat24StaticSet
+    # input_set = OMat24StaticSet(structure)
+    # input_set.write_input(dir_name)
+    # This should overwrite writeinputs function like this
+    # class VaspNoWrite(Vasp):
+    #     def write_input(self, atoms, properties=None, system_changes=None):
+    #         pass
     return calc
 
 

@@ -15,10 +15,10 @@ k = 5
 num_frames = 10
 
 device = "cuda"
-model_name_or_path = "uma-s-1p1"
+name_or_path = "uma-s-1p1"
 task_name = "oc20"
 
-calc = FAIRChemCalculator.from_model_checkpoint(model_name_or_path, task_name, device=device)
+calc = FAIRChemCalculator.from_model_checkpoint(name_or_path, task_name, device=device)
 
 reactant = read("optimized_reactant.vasp")
 product = read("optimized_product.vasp")
