@@ -117,8 +117,13 @@ conda create --prefix /work/08405/ilgar/vista/conda_libraries/tsearch --clone ex
 
 pip config set global.cache-dir "/path/to/your/cache/directory"  # like $SCRATCH/.cache/pip
 
-pip install fairchem-core fairchem-data-oc
-pip install scipy==1.16
+pip install fairchem-core scipy==1.16
+# If you want Vasp inpute files to be created like in omat/oc20:
+pip install fairchem-data-omat
+# If you will need some of the catsunami functionality or create Vasp input files for oc20
+pip install fairchem-data-oc
+# If you will need VaspInteractive
+pip install git+https://github.com/ulissigroup/vasp-interactive.git
 
 # This part below is only necessary for Vista (not for Lonestar6 or Perlmutter)
 pip uninstall torch

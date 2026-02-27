@@ -4,9 +4,6 @@ import logging
 import numpy as np
 from ase.optimize.precon import Precon, PreconImages
 
-from fairchem.core.common.utils import setup_imports, setup_logging
-from fairchem.core.datasets.atomic_data import atomicdata_list_to_batch
-
 from ase.mep.neb import DyNEB, NEBState
 from ase.mep.neb import NEBMethod
 
@@ -72,6 +69,7 @@ class OCPNEB(DyNEB):
         precon=None,
         batch_size=8,
         dneb=False,
+        vasp=False,
     ):
         """
         Subclass of NEB that allows for scaled and dynamic optimizations of
@@ -114,125 +112,136 @@ class OCPNEB(DyNEB):
             scale_fmax=scale_fmax,
         )
         if dneb: self.neb_method = swDNEB(self)
+        self.vasp = vasp
 
-        self.batch_size = batch_size
-        setup_imports()
-        setup_logging()
+        if not self.vasp:
+            from fairchem.core.common.utils import setup_imports, setup_logging
+            from fairchem.core.datasets.atomic_data import atomicdata_list_to_batch
+            self.atomicdata_list_to_batch = atomicdata_list_to_batch
+            
+            self.batch_size = batch_size
+            setup_imports()
+            setup_logging()
 
-        tmp_calc = self.images[1].calc
-        self.predictor = tmp_calc.predictor
-        self.a2g = tmp_calc.a2g
+            tmp_calc = self.images[1].calc
+            self.predictor = tmp_calc.predictor
+            self.a2g = tmp_calc.a2g
 
-        if self.method != 'aseneb':
             self.reactant_energy = self.images[0].get_potential_energy()
+            self.reactant_forces = self.images[0].get_forces()
             self.product_energy = self.images[-1].get_potential_energy()
+            self.product_forces = self.images[-1].get_forces()
 
-        self.intermediate_energies = []
-        self.intermediate_forces = []
-        self.cached = False
+            self.intermediate_energies = []
+            self.intermediate_forces = []
+            self.cached = False
 
 
     def get_forces(self):
-        images = self.images[1:-1]
-        if self.cached:
-            energies = self.intermediate_energies
-            forces = self.intermediate_forces
+        if self.vasp:
+            return super().get_forces()
         else:
-            energies_calcd = []
-            forces_calcd = []
-            for i in range(0, len(images), self.batch_size):
-                batch_images = images[i : i + self.batch_size]
-                data_list = [self.a2g(img) for img in batch_images]
-                batch = atomicdata_list_to_batch(data_list)
+            images = self.images[1:-1]
+            if self.cached:
+                energies = self.intermediate_energies
+                forces = self.intermediate_forces
+            else:
+                energies_calcd = []
+                forces_calcd = []
+                for i in range(0, len(images), self.batch_size):
+                    batch_images = images[i : i + self.batch_size]
+                    data_list = [self.a2g(img) for img in batch_images]
+                    batch = self.atomicdata_list_to_batch(data_list)
 
-                predictions = self.predictor.predict(batch)
-                energies_calcd.extend(predictions["energy"].detach().cpu().flatten().tolist())
-                forces_calcd.extend(predictions["forces"].detach().cpu().numpy())
+                    predictions = self.predictor.predict(batch)
+                    energies_calcd.extend(predictions["energy"].detach().cpu().flatten().tolist())
+                    forces_calcd.extend(predictions["forces"].detach().cpu().numpy())
 
-            forces = np.array(forces_calcd)
+                forces = np.array(forces_calcd)
 
-            energies = np.empty(self.nimages)
-            energies[1:-1] = energies_calcd
+                energies = np.empty(self.nimages)
+                energies[1:-1] = energies_calcd
 
-            if self.method != 'aseneb':
                 energies[0] = self.reactant_energy
                 energies[-1] = self.product_energy
 
-            # Handle constraints:
-            if self.images[0].constraints and np.equal(self.images[0].get_tags(), np.zeros(len(self.images[0]),int)).all():  # if had constraints and all atom tags are 0
-                fixed_atoms = self.images[0].constraints[0].get_indices()
-            elif not np.equal(self.images[0].get_tags(), np.zeros(len(self.images[0]),int)).all():
-                fixed_atoms = np.array([idx for idx, tag in enumerate(self.images[0].get_tags()) if tag == 0])
-            else:
-                fixed_atoms = np.array([],dtype=int) 
-
-            for i in range(self.nimages - 2):
-                for fixed_atom in fixed_atoms:
-                    forces[fixed_atom + len(images[0]) * i] = [0, 0, 0]
-
-            forces = np.reshape(forces, (len(images), self.natoms, 3))
-            forces = self.get_precon_forces(forces, energies, self.images)
-
-            self.intermediate_forces = forces
-            self.intermediate_energies = energies
-            self.cached = True
-
-        if not self.dynamic_relaxation:
-            return forces
-        """Get NEB forces and scale the convergence criteria to focus
-           optimization on saddle point region. The keyword scale_fmax
-           determines the rate of convergence scaling."""
-        n = self.natoms
-        for i in range(self.nimages - 2):
-            n1 = n * i
-            n2 = n1 + n
-            force = np.sqrt((forces[n1:n2] ** 2.0).sum(axis=1)).max()
-            n_imax = (self.imax - 1) * n  # Image with highest energy.
-
-            positions = self.get_positions()
-            pos_imax = positions[n_imax : n_imax + n]
-
-            """Scale convergence criteria based on distance between an
-               image and the image with the highest potential energy."""
-            rel_pos = np.sqrt(((positions[n1:n2] - pos_imax) ** 2).sum())
-            if force < self.fmax * (1 + rel_pos * self.scale_fmax):
-                if i == self.imax - 1:
-                    # Keep forces at saddle point for the log file.
-                    pass
+                # Handle constraints:
+                if self.images[0].constraints and np.equal(self.images[0].get_tags(), np.zeros(len(self.images[0]),int)).all():  # if had constraints and all atom tags are 0
+                    fixed_atoms = self.images[0].constraints[0].get_indices()
+                elif not np.equal(self.images[0].get_tags(), np.zeros(len(self.images[0]),int)).all():
+                    fixed_atoms = np.array([idx for idx, tag in enumerate(self.images[0].get_tags()) if tag == 0])
                 else:
-                    # Set forces to zero before they are sent to optimizer.
-                    forces[n1:n2, :] = 0
+                    fixed_atoms = np.array([],dtype=int) 
+
+                for i in range(self.nimages - 2):
+                    for fixed_atom in fixed_atoms:
+                        forces[fixed_atom + len(images[0]) * i] = [0, 0, 0]
+
+                forces = np.reshape(forces, (len(images), self.natoms, 3))
+                forces = self.get_precon_forces(forces, energies, self.images)
+
+                self.intermediate_forces = forces
+                self.intermediate_energies = energies
+                self.cached = True
+
+            if not self.dynamic_relaxation:
+                return forces
+            """Get NEB forces and scale the convergence criteria to focus
+            optimization on saddle point region. The keyword scale_fmax
+            determines the rate of convergence scaling."""
+            n = self.natoms
+            for i in range(self.nimages - 2):
+                n1 = n * i
+                n2 = n1 + n
+                force = np.sqrt((forces[n1:n2] ** 2.0).sum(axis=1)).max()
+                n_imax = (self.imax - 1) * n  # Image with highest energy.
+
+                positions = self.get_positions()
+                pos_imax = positions[n_imax : n_imax + n]
+
+                """Scale convergence criteria based on distance between an
+                image and the image with the highest potential energy."""
+                rel_pos = np.sqrt(((positions[n1:n2] - pos_imax) ** 2).sum())
+                if force < self.fmax * (1 + rel_pos * self.scale_fmax):
+                    if i == self.imax - 1:
+                        # Keep forces at saddle point for the log file.
+                        pass
+                    else:
+                        # Set forces to zero before they are sent to optimizer.
+                        forces[n1:n2, :] = 0
 
         return forces
 
     def set_positions(self, positions):
-
-        self.cached = False
-        if not self.dynamic_relaxation:
+        if self.vasp:
             return super().set_positions(positions)
+        else:
+            self.cached = False
+            if not self.dynamic_relaxation:
+                return super().set_positions(positions)
 
-        n1 = 0
-        # old_positions = self.images[0].get_positions()
-        # tags_hier = [self.images[i].get_tags() for i in range(self.nimages)]
-        # tags = [x for l in tags_hier for x in l]
-        for i, image in enumerate(self.images[1:-1]):
-            if self.parallel:
-                msg = (
-                    "Dynamic relaxation does not work efficiently "
-                    "when parallelizing over images. Try AutoNEB "
-                    "routine for freezing images in parallel."
-                )
-                raise ValueError(msg)
-            else:
-                forces_dyn = self._fmax_all(self.images)
-                if forces_dyn[i] < self.fmax:
-                    n1 += self.natoms
+            n1 = 0
+            # old_positions = self.images[0].get_positions()
+            # tags_hier = [self.images[i].get_tags() for i in range(self.nimages)]
+            # tags = [x for l in tags_hier for x in l]
+            for i, image in enumerate(self.images[1:-1]):
+                if self.parallel:
+                    msg = (
+                        "Dynamic relaxation does not work efficiently "
+                        "when parallelizing over images. Try AutoNEB "
+                        "routine for freezing images in parallel."
+                    )
+                    raise ValueError(msg)
                 else:
-                    n2 = n1 + self.natoms
-                    # new_positions = [old_positions[idx-n1] if tags[idx] == 0 else positions[idx] for idx in range(n1,n2)]
-                    # image.set_positions(new_positions)
-                    image.set_positions(positions[n1:n2])
-                    n1 = n2
+                    forces_dyn = self._fmax_all(self.images)
+                    if forces_dyn[i] < self.fmax:
+                        n1 += self.natoms
+                    else:
+                        n2 = n1 + self.natoms
+                        # new_positions = [old_positions[idx-n1] if tags[idx] == 0 else positions[idx] for idx in range(n1,n2)]
+                        # image.set_positions(new_positions)
+                        image.set_positions(positions[n1:n2])
+                        n1 = n2
         return None
 
     def get_precon_forces(self, forces, energies, images):
@@ -247,6 +256,8 @@ class OCPNEB(DyNEB):
         self.energies = energies
         self.real_forces = np.zeros((self.nimages, self.natoms, 3))
         self.real_forces[1:-1] = forces
+        self.real_forces[0] = self.reactant_forces
+        self.real_forces[-1] = self.product_forces
 
         state = NEBState(self, images, energies)
 

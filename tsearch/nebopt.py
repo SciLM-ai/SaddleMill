@@ -15,6 +15,10 @@ from tsearch.catsunami.ocpneb import OCPNEB
 def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
 
     rank = executorlib_worker_id
+    relax_endpoints = config_dict["ourNEB"]["relax_endpoints"]
+    interpolate_method = config_dict["ourNEB"]["interpolate_method"]  # this is idpp implementation from Meta OCP, other choises are "ase_idpp" and "ase_linear" or False if you already have a frame set
+    perform_aseidpp = False
+    num_frames = config_dict["ourNEB"]["num_frames"]
     zip_name = f"{config_dict['Main']['method']}_debug_zips/structure_rank_{rank}_data.zip"
     status_file = f"{config_dict['Main']['method']}_status_csvs/status_rank_{rank}.csv"
     my_output_file = f"{config_dict['Main']['method']}_trajes/collected_ts_rank_{rank}.traj"
@@ -26,32 +30,54 @@ def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
     temp_react_relax = f'reactant_relaxation_{i}.traj'
     temp_prod_relax = f'product_relaxation_{i}.traj'
     temp_files = [temp_log, temp_traj, temp_plot, temp_react_relax_log, temp_prod_relax_log, temp_react_relax, temp_prod_relax]
+    if config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"):
+        temp_files.extend([f"{i}_{image_idx}" for image_idx in range(num_frames)])
 
     def log_status(status_msg):
         with open(status_file, 'a') as f:
             f.write(f"{i},{rank},{status_msg}\n")
 
-    relax_endpoints = config_dict["ourNEB"]["relax_endpoints"]
-    interpolate_method = config_dict["ourNEB"]["interpolate_method"]  # this is idpp implementation from Meta OCP, other choises are "ase_idpp" and "ase_linear" or False if you already have a frame set
-    perform_aseidpp = False
-    num_frames = config_dict["ourNEB"]["num_frames"]
-
     try:
         reactant = images[0]
+        if config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"):
+            reactant.calc = calc(
+                directory=f"{i}_{0}",
+                command=config_dict["ourNEB"]["vasp_command_endpoints"],
+                ncore=int(config_dict["ourNEB"]["vasp_ncore_endpoints"]),
+                **config_dict["Vasp"],
+                )
+        else:
+            reactant.calc = calc
+
         product = images[-1]
+        if config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"):
+            product.calc = calc(
+                directory=f"{i}_{num_frames-1}",
+                command=config_dict["ourNEB"]["vasp_command_endpoints"],
+                ncore=int(config_dict["ourNEB"]["vasp_ncore_endpoints"]),
+                **config_dict["Vasp"],
+                )
+        else:
+            product.calc = calc
 
         if relax_endpoints:
             if not interpolate_method: print("Are you sure you want to relax end points while keeping the intermediate images from your traj?")
-            reactant.calc = calc
             if config_dict["ourNEB"]["endpoint_relax_Optimizer"] is None:
                 endpoint_relax_optimizer_name = config_dict["Main"]["Optimizer"]
             else:
                 endpoint_relax_optimizer_name = config_dict["ourNEB"]["endpoint_relax_Optimizer"]
+
             opt = Optimizer[0](reactant, logfile=temp_react_relax_log, trajectory=temp_react_relax, **config_dict[endpoint_relax_optimizer_name])
             opt.run(config_dict["ourNEB"]["endpoint_relax_fmax"], config_dict["ourNEB"]["endpoint_relax_steps"])
-            product.calc = calc
+            energy, forces = reactant.get_potential_energy(), reactant.get_forces()
+            if config_dict["Main"]["Calculator"] == "VaspInteractive": reactant.calc.finalize()
+            reactant.calc = SinglePointCalculator(reactant, energy=energy, forces=forces)
+
             opt = Optimizer[0](product, logfile=temp_prod_relax_log, trajectory=temp_prod_relax, **config_dict[endpoint_relax_optimizer_name])
             opt.run(config_dict["ourNEB"]["endpoint_relax_fmax"], config_dict["ourNEB"]["endpoint_relax_steps"])
+            energy, forces = product.get_potential_energy(), product.get_forces()
+            if config_dict["Main"]["Calculator"] == "VaspInteractive": product.calc.finalize()
+            product.calc = SinglePointCalculator(product, energy=energy, forces=forces)
 
         if interpolate_method:
             if interpolate_method == "ocp_idpp":
@@ -97,13 +123,22 @@ def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
                 if perform_aseidpp:
                     neb0.interpolate(method="idpp", mic=True)
 
-        for image in images:
-            image.calc = calc
+        for image_idx in range(1,num_frames-1):
+            if config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"):
+                images[image_idx].calc = calc(
+                    directory=f"{i}_{image_idx}",
+                    command=config_dict["ourNEB"]["vasp_command_intermediates"],
+                    ncore=int(config_dict["ourNEB"]["vasp_ncore_intermediates"]),
+                    **config_dict["Vasp"],
+                    )
+            else:
+                images[image_idx].calc = calc
 
         neb = OCPNEB(
             images,
             batch_size = config_dict["ourNEB"]["batch_size"], # If you get a memory error, try reducing it to 4
             dneb = config_dict["ourNEB"]["DNEB"],
+            vasp = config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"),
             **config_dict["DyNEB"],
         )
 
@@ -114,10 +149,14 @@ def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
                            )
         converged = opt.run(fmax = config_dict["Main"]["fmax"], steps = config_dict["Main"]["steps"])
 
+        if config_dict["Main"]["Calculator"] == "VaspInteractive":
+            for img in neb.images[1:-1]:
+                img.calc.finalize()
+
         ci_image = neb.images[neb.imax].copy()
-        energy = neb.intermediate_energies[neb.imax]
-        forces = neb.intermediate_forces[len(ci_image)*(neb.imax-1):len(ci_image)*neb.imax]
-        state = NEBState(neb, neb.images, neb.intermediate_energies)
+        energy = neb.energies[neb.imax]
+        forces = neb.real_forces[neb.imax]
+        state = NEBState(neb, neb.images, neb.energies)
         spring1 = state.spring(neb.imax-1)
         spring2 = state.spring(neb.imax)
         tangent = neb.neb_method.get_tangent(state, spring1, spring2, neb.imax)
@@ -151,6 +190,10 @@ def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
             log_status("not_converged")
 
         # Clean up temp files
+        if config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"):
+            for image_idx in range(num_frames):
+                for vasp_heavy_files in [f'{i}_{image_idx}/WAVECAR',f'{i}_{image_idx}/CHG',f'{i}_{image_idx}/CHGCAR']:
+                    if os.path.exists(vasp_heavy_files): os.remove(vasp_heavy_files)
         existing_files = [f for f in temp_files if os.path.exists(f)]
         if existing_files and config_dict['Main']['zip']:
             with zipfile.ZipFile(zip_name, 'a', zipfile.ZIP_DEFLATED) as zf:
@@ -162,6 +205,10 @@ def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
     except Exception as e:
         print(f"Rank {rank} FAILED on structure {i}: {e}")
         print(f"\nTraceback details:\n{traceback.format_exc()}")
+        if config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"):
+            for image_idx in range(num_frames):
+                for vasp_heavy_files in [f'{i}_{image_idx}/WAVECAR',f'{i}_{image_idx}/CHG',f'{i}_{image_idx}/CHGCAR']:
+                    if os.path.exists(vasp_heavy_files): os.remove(vasp_heavy_files)
         existing_files = [f for f in temp_files if os.path.exists(f)]
         if existing_files and config_dict['Main']['zip']:
             with zipfile.ZipFile(zip_name, 'a', zipfile.ZIP_DEFLATED) as zf:

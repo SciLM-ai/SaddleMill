@@ -8,7 +8,7 @@ fmax = 0.001
 k = 5
 num_frames = 10
 device = "cuda"
-model_name_or_path = "uma-s-1p1"
+name_or_path = "uma-s-1p1"
 task_name = "oc20"
 
 reactant = read("optimized_reactant.vasp")
@@ -30,7 +30,7 @@ neb = NEB(
 neb.interpolate()
 
 for image in images:
-    image.calc = FAIRChemCalculator.from_model_checkpoint(model_name_or_path, task_name, device=device)
+    image.calc = FAIRChemCalculator.from_model_checkpoint(name_or_path, task_name, device=device)
 
 optimizer = MDMin(neb, dt=0.02, maxstep=0.1, trajectory=f"your-neb.traj")
 conv = optimizer.run(fmax=fmax, steps=500)
