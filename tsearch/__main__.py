@@ -1,10 +1,11 @@
+import os
 import concurrent.futures
 from ase.io import Trajectory
 from itertools import groupby
 from contextlib import nullcontext
 from tsearch.init_function import init_function
 from tsearch.tools import save_ordered_traj_names, read_ordered_traj_names, clean_up_files
-from tsearch.config import load_config, load_method, get_trajes_and_indices, create_results_directories, get_remaining_trajes
+from tsearch.config import load_config, load_method, get_trajes_and_indices, create_results_directories, get_remaining_trajes, get_flux_resources
 
 
 def check_and_print_status(futures, total):
@@ -34,30 +35,21 @@ def main():
 
     if config_dict["Main"]["executorlib"]:
         from executorlib import FluxJobExecutor
-        from flux import Flux, resource
 
-        handle = Flux()
-        rs = resource.status.ResourceStatusRPC(handle).get()
-        rl = resource.list.resource_list(handle).get()
-        all_ncores = rl.all.ncores
-        all_ngpus = rl.all.ngpus
-        print(all_ncores,all_ngpus)
-
-        jobs_per_gpu = config_dict["Main"]["jobs_per_gpu"]
-        gpus_per_core = 1 if jobs_per_gpu == 1 else 0
-        cpus_per_job = all_ncores // (all_ngpus*jobs_per_gpu) #- 1
+        max_workers, cores, gpus_per_core, threads_per_core = get_flux_resources(config_dict)
 
         executor = FluxJobExecutor(
             flux_log_files = True,
-            max_workers = all_ngpus * jobs_per_gpu,
+            max_workers = max_workers,
             block_allocation = True,
             init_function = init_function,
             resource_dict = {
-                "cores": 1,
+                "cores": cores,
                 "gpus_per_core": gpus_per_core,
-                "threads_per_core": cpus_per_job,
+                "threads_per_core": threads_per_core,
                 "num_nodes": 1,
-                "error_log_file": "error"
+                "error_log_file": "error",
+                "cwd": os.getcwd(),
             }
         )
         # 'exe' will be the executor instance

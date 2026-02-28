@@ -14,6 +14,8 @@ class ConfigManager:
             "fmax": 0.05,
             "steps": 1000,
             "Calculator": "FAIRChemCalculator",
+            "device": 'cuda',
+            "jobs_per_node": 1,  # this only used if device = 'cpu', otherwise jobs_per_gpu is used
             "jobs_per_gpu": 1,
             "resume": False,
             "zip": True,
@@ -218,7 +220,7 @@ def get_trajes_and_indices(config_dict):
     input_pattern = os.path.join(dir_path, "*.traj")
     all_traj_files = sorted(glob.glob(input_pattern))
     
-    if config_dict["ourNEB"]["images_location_in_input_traj"] == ":":
+    if config_dict["ourNEB"]["images_location_in_input_traj"] in (":", -1):
         traj_lens = []
         for traj_name in all_traj_files:
             with Trajectory(traj_name, 'r') as traj:
@@ -267,3 +269,36 @@ def get_remaining_trajes(trajes_and_idxs, config_dict):
     ids_to_skip = set(successful_jobs.iloc[:, 0])
     job_IDs, trajes_and_idxs = zip(*[[i,item] for i, item in enumerate(trajes_and_idxs) if i not in ids_to_skip])
     return job_IDs, trajes_and_idxs
+
+
+def get_flux_resources(config_dict):
+    from flux import Flux, resource
+
+    handle = Flux()
+    rset = resource.list.resource_list(handle).get().all
+    all_ncores = rset.ncores
+    all_ngpus = rset.ngpus
+    nnodes = rset.nnodes
+    print(f"Number of nodes: {nnodes}, total number of CPU cores: {all_ncores}, total number of GPUs: {all_ngpus}")
+
+    jobs_per_gpu = config_dict["Main"]["jobs_per_gpu"]
+    jobs_per_node = config_dict["Main"]["jobs_per_node"]
+
+    if config_dict["Main"]["device"] == 'cuda':
+        max_workers = all_ngpus * jobs_per_gpu
+        gpus_per_core = 1 if jobs_per_gpu == 1 else 0
+        cores = 1
+        threads_per_core = all_ncores // max_workers # - 1
+    elif config_dict["Main"]["device"] == 'cpu':
+        max_workers = nnodes * jobs_per_node
+        gpus_per_core = 0
+        if config_dict["Main"]["Calculator"] in ("#Vasp", "#VaspInteractive"):
+            cores = (all_ncores-1) // max_workers
+            threads_per_core = 1
+        else:
+            cores = 1
+            # threads_per_core = (all_ncores-1) // nnodes
+            threads_per_core = all_ncores // nnodes
+    else:
+        raise ValueError("Only devices cuda and cpu available. Please set one of the two in Main section of config.ini")
+    return max_workers, cores, gpus_per_core, threads_per_core

@@ -1,4 +1,5 @@
 import os
+import shutil
 import traceback
 import matplotlib
 matplotlib.use('Agg')
@@ -69,15 +70,17 @@ def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
 
             opt = Optimizer[0](reactant, logfile=temp_react_relax_log, trajectory=temp_react_relax, **config_dict[endpoint_relax_optimizer_name])
             opt.run(config_dict["ourNEB"]["endpoint_relax_fmax"], config_dict["ourNEB"]["endpoint_relax_steps"])
-            energy, forces = reactant.get_potential_energy(), reactant.get_forces()
-            if config_dict["Main"]["Calculator"] == "VaspInteractive": reactant.calc.finalize()
-            reactant.calc = SinglePointCalculator(reactant, energy=energy, forces=forces)
 
             opt = Optimizer[0](product, logfile=temp_prod_relax_log, trajectory=temp_prod_relax, **config_dict[endpoint_relax_optimizer_name])
             opt.run(config_dict["ourNEB"]["endpoint_relax_fmax"], config_dict["ourNEB"]["endpoint_relax_steps"])
-            energy, forces = product.get_potential_energy(), product.get_forces()
-            if config_dict["Main"]["Calculator"] == "VaspInteractive": product.calc.finalize()
-            product.calc = SinglePointCalculator(product, energy=energy, forces=forces)
+
+        energy, forces = reactant.get_potential_energy(), reactant.get_forces()
+        if config_dict["Main"]["Calculator"] == "VaspInteractive": reactant.calc.finalize()
+        reactant.calc = SinglePointCalculator(reactant, energy=energy, forces=forces)
+
+        energy, forces = product.get_potential_energy(), product.get_forces()
+        if config_dict["Main"]["Calculator"] == "VaspInteractive": product.calc.finalize()
+        product.calc = SinglePointCalculator(product, energy=energy, forces=forces)
 
         if interpolate_method:
             if interpolate_method == "ocp_idpp":
@@ -134,12 +137,18 @@ def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
             else:
                 images[image_idx].calc = calc
 
+        is_vasp = config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive")
+        dyneb_kwargs = dict(config_dict["DyNEB"])
+        if is_vasp:
+            dyneb_kwargs.setdefault("parallel", True)
+            dyneb_kwargs["allow_shared_calculator"] = False
+
         neb = OCPNEB(
             images,
             batch_size = config_dict["ourNEB"]["batch_size"], # If you get a memory error, try reducing it to 4
             dneb = config_dict["ourNEB"]["DNEB"],
-            vasp = config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"),
-            **config_dict["DyNEB"],
+            vasp = is_vasp,
+            **dyneb_kwargs,
         )
 
         opt = Optimizer[1](neb,
@@ -198,13 +207,26 @@ def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
         if existing_files and config_dict['Main']['zip']:
             with zipfile.ZipFile(zip_name, 'a', zipfile.ZIP_DEFLATED) as zf:
                 for f_name in existing_files:
-                    zf.write(f_name, arcname=f"{f_name}")
+                    if os.path.isdir(f_name):
+                        for root, dirs, files in os.walk(f_name):
+                            for file in files:
+                                zf.write(os.path.join(root, file))
+                    else:
+                        zf.write(f_name, arcname=f_name)
             for f_name in existing_files:
-                os.remove(f_name)
+                if os.path.isdir(f_name):
+                    shutil.rmtree(f_name)
+                else:
+                    os.remove(f_name)
 
     except Exception as e:
         print(f"Rank {rank} FAILED on structure {i}: {e}")
         print(f"\nTraceback details:\n{traceback.format_exc()}")
+        if config_dict["Main"]["Calculator"] == "VaspInteractive":
+            from vasp_interactive import VaspInteractive
+            for image in images:
+                if isinstance(image.calc, VaspInteractive):
+                    image.calc.finalize()
         if config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"):
             for image_idx in range(num_frames):
                 for vasp_heavy_files in [f'{i}_{image_idx}/WAVECAR',f'{i}_{image_idx}/CHG',f'{i}_{image_idx}/CHGCAR']:
@@ -213,8 +235,16 @@ def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
         if existing_files and config_dict['Main']['zip']:
             with zipfile.ZipFile(zip_name, 'a', zipfile.ZIP_DEFLATED) as zf:
                 for f_name in existing_files:
-                    zf.write(f_name, arcname=f"{f_name}")
+                    if os.path.isdir(f_name):
+                        for root, dirs, files in os.walk(f_name):
+                            for file in files:
+                                zf.write(os.path.join(root, file))
+                    else:
+                        zf.write(f_name, arcname=f_name)
             for f_name in existing_files:
-                os.remove(f_name)
+                if os.path.isdir(f_name):
+                    shutil.rmtree(f_name)
+                else:
+                    os.remove(f_name)
         log_status("error")
 
