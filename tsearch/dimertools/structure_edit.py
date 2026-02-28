@@ -3,7 +3,7 @@ import numpy as np
 import random
 from ase import Atom
 from ase.constraints import FixAtoms
-from ase.neighborlist import NeighborList, natural_cutoffs, neighbor_list
+from ase.neighborlist import NeighborList, natural_cutoffs, neighbor_list, mic
 from ase.build import make_supercell
 from ase.data import covalent_radii, atomic_numbers
 
@@ -50,10 +50,7 @@ def find_interstitial_sites(atoms, min_dist_frac=0.4):
     shifts = np.array(
         [[i, j, k] for i in range(-1, 2) for j in range(-1, 2) for k in range(-1, 2)]
     )
-    all_positions = []
-    for s in shifts:
-        all_positions.append(positions + s @ cell)
-    all_positions = np.vstack(all_positions)
+    all_positions = np.vstack([positions + s @ cell for s in shifts])
 
     if len(all_positions) < 4:
         return np.empty((0, 3))
@@ -61,9 +58,8 @@ def find_interstitial_sites(atoms, min_dist_frac=0.4):
     vor = Voronoi(all_positions)
     vertices = vor.vertices
 
-    inv_cell = np.linalg.inv(cell)
-
     # Keep vertices inside the unit cell (fractional coords in [0, 1))
+    inv_cell = np.linalg.inv(cell)
     frac_coords = vertices @ inv_cell
     inside = np.all((frac_coords >= -1e-6) & (frac_coords < 1.0 - 1e-6), axis=1)
     candidates = vertices[inside]
@@ -74,50 +70,29 @@ def find_interstitial_sites(atoms, min_dist_frac=0.4):
     # Compute nearest-neighbor distance in the original structure
     if len(atoms) >= 2:
         _, _, d = neighbor_list('ijd', atoms, 5.0)
-        if len(d) > 0:
-            nn_dist = d.min()
-        else:
-            nn_dist = 2.5  # fallback
+        nn_dist = d.min() if len(d) > 0 else 2.5
     else:
         nn_dist = 2.5
 
     min_dist = min_dist_frac * nn_dist
 
-    # Filter: keep sites far enough from any real atom (using MIC)
-    keep = []
-    for idx, site in enumerate(candidates):
-        deltas = positions - site
-        frac_deltas = deltas @ inv_cell
-        frac_deltas -= np.round(frac_deltas)
-        cart_deltas = frac_deltas @ cell
-        dists_to_atoms = np.linalg.norm(cart_deltas, axis=1)
-        if dists_to_atoms.min() > min_dist:
-            keep.append(idx)
+    # Filter: keep sites far enough from any real atom (vectorized)
+    # deltas shape: (N_sites, N_atoms, 3) → flatten for mic, then restore
+    deltas = (candidates[:, None, :] - positions[None, :, :]).reshape(-1, 3)
+    min_dists = np.linalg.norm(mic(deltas, cell).reshape(len(candidates), len(positions), 3), axis=-1).min(axis=1)
+    candidates = candidates[min_dists > min_dist]
 
-    if len(keep) == 0:
+    if len(candidates) == 0:
         return np.empty((0, 3))
-
-    candidates = candidates[keep]
 
     # Cluster nearby sites within 0.5 Å
     if len(candidates) > 1:
         Z = linkage(candidates, method='single')
         labels = fcluster(Z, t=0.5, criterion='distance')
         unique_labels = np.unique(labels)
-        clustered = []
-        for lbl in unique_labels:
-            mask = labels == lbl
-            clustered.append(candidates[mask].mean(axis=0))
-        candidates = np.array(clustered)
+        candidates = np.array([candidates[labels == lbl].mean(axis=0) for lbl in unique_labels])
 
     return candidates
-
-
-def _mic_vector(vec, cell, inv_cell):
-    """Apply minimum image convention to a vector or array of vectors."""
-    frac = vec @ inv_cell
-    frac -= np.round(frac)
-    return frac @ cell
 
 
 def _safe_normalize(vec):
@@ -129,9 +104,9 @@ def _safe_normalize(vec):
     return vec / norm
 
 
-def _nearest_site(site_a, other_sites, cell, inv_cell):
+def _nearest_site(site_a, other_sites, cell):
     """Return the nearest site from other_sites to site_a under MIC."""
-    deltas = _mic_vector(other_sites - site_a, cell, inv_cell)
+    deltas = mic(other_sites - site_a, cell)
     dists = np.linalg.norm(deltas, axis=1)
     idx = np.argmin(dists)
     return other_sites[idx], deltas[idx]
@@ -145,16 +120,35 @@ def _get_atom_selection_weights(atoms):
     return weights
 
 
+def _shuffled_site_indices(n_sites, n_attempts):
+    """Return n_attempts site indices cycling through a shuffled list (no repeats per cycle)."""
+    indices = list(range(n_sites))
+    random.shuffle(indices)
+    return [indices[i % n_sites] for i in range(n_attempts)]
+
+
+def _maybe_gaussian(disp_dict, center_idx, p=0.1):
+    """With probability p, replace a directed displacement with ASE Gaussian noise.
+
+    Returning {"displacement_center": center_idx} tells ASE's MinModeAtoms to apply
+    a random Gaussian displacement centred on that atom, which lets the dimer discover
+    reaction types that the directed guess might miss.
+    """
+    if random.random() < p:
+        return {"displacement_center": int(center_idx)}
+    return disp_dict
+
+
 # --- Element sampling pools ---
 
 _HOP_INSERT_ELEMENTS = [1, 6, 7, 8, 5]  # H, C, N, O, B (small interstitial species)
+_HOP_INSERT_WEIGHTS = np.array([1.0 / covalent_radii[z] for z in _HOP_INSERT_ELEMENTS])
+_HOP_INSERT_WEIGHTS /= _HOP_INSERT_WEIGHTS.sum()
 
 
 def _sample_hop_insert_element():
     """Sample a common small interstitial element weighted by inverse covalent radius."""
-    weights = np.array([1.0 / covalent_radii[z] for z in _HOP_INSERT_ELEMENTS])
-    weights /= weights.sum()
-    idx = np.random.choice(len(_HOP_INSERT_ELEMENTS), p=weights)
+    idx = np.random.choice(len(_HOP_INSERT_ELEMENTS), p=_HOP_INSERT_WEIGHTS)
     return _HOP_INSERT_ELEMENTS[idx]
 
 
@@ -176,10 +170,8 @@ def _sample_kickout_insert_element(atoms, sigma=0.2):
     """
     host_radii = np.array([covalent_radii[z] for z in atoms.get_atomic_numbers()])
     r_avg = host_radii.mean()
-
     weights = np.exp(-(_KICKOUT_INSERT_POOL_RADII - r_avg) ** 2 / (2 * sigma ** 2))
     weights /= weights.sum()
-
     idx = np.random.choice(len(_KICKOUT_INSERT_POOL_Z), p=weights)
     return _KICKOUT_INSERT_POOL_Z[idx]
 
@@ -187,8 +179,19 @@ def _sample_kickout_insert_element(atoms, sigma=0.2):
 # --- Vacancy attempts ---
 
 def get_vacancy_attempts(atoms, config_dict, num_attempts):
-    """Original bulk vacancy mechanism extracted from get_attempts."""
+    """Vacancy-mediated diffusion with three sub-mechanisms sampled with equal probability:
+
+    0. NN hop: a nearest-neighbor atom hops directly into the vacancy.
+    1. NNN hop: a second-nearest-neighbor atom hops directly into the vacancy.
+    2. Concerted 2-atom chain: NN hops into the vacancy while its NNN simultaneously
+       hops into the NN's original site.
+
+    All mechanisms displace atoms halfway along the hop vector (good saddle-point guess).
+    With 10% probability, the directed displacement is replaced by Gaussian noise centred
+    on the primary atom (allows the dimer to discover unexpected reaction paths).
+    """
     atoms = turn_into_supercell(atoms)
+    cell = atoms.get_cell()
     i_idx, j_idx = neighbor_list('ij', atoms, 3.5)
 
     num_attempts = min(num_attempts, len(atoms))
@@ -199,20 +202,104 @@ def get_vacancy_attempts(atoms, config_dict, num_attempts):
     selected_indices = []
 
     for rm_idx in remove_indices:
-        neighbor_indices = j_idx[i_idx == rm_idx]
-        if len(neighbor_indices) == 0:
-            neighbor_indices = [x for x in range(len(atoms)) if x != rm_idx]
+        vacancy_pos = atoms.positions[rm_idx].copy()
 
-        chosen_neighbor = random.choice(neighbor_indices)
+        nn_indices = list(j_idx[i_idx == rm_idx])
+        if len(nn_indices) == 0:
+            nn_indices = [x for x in range(len(atoms)) if x != rm_idx]
 
-        atoms_new = atoms.copy()
-        del atoms_new[rm_idx]
-        atoms_new.info['reaction_type'] = 'vacancy'
-        images.append(atoms_new)
+        mechanism = random.randint(0, 2)
 
-        new_center_idx = chosen_neighbor if chosen_neighbor < rm_idx else chosen_neighbor - 1
-        displacement_dicts.append({"displacement_center": int(new_center_idx)})
-        selected_indices.append(rm_idx)
+        if mechanism == 0:
+            # Direct NN hop: NN atom moves into the vacancy.
+            chosen_nn = random.choice(nn_indices)
+            nn_pos = atoms.positions[chosen_nn].copy()
+
+            atoms_new = atoms.copy()
+            del atoms_new[rm_idx]
+            new_nn_idx = chosen_nn if chosen_nn < rm_idx else chosen_nn - 1
+
+            disp_vector = np.zeros((len(atoms_new), 3))
+            disp_vector[new_nn_idx] = 0.5 * mic(vacancy_pos - nn_pos, cell)
+
+            atoms_new.info['reaction_type'] = 'vacancy'
+            images.append(atoms_new)
+            displacement_dicts.append(_maybe_gaussian(
+                {"displacement_vector": disp_vector, "method": "vector"}, new_nn_idx))
+            selected_indices.append(rm_idx)
+
+        elif mechanism == 1:
+            # NNN hop: NNN atom hops directly toward the vacancy.
+            nn_set = set(nn_indices)
+            nnn_pairs = [
+                (int(nnn), int(nn))
+                for nn in nn_indices
+                for nnn in j_idx[i_idx == nn]
+                if nnn != rm_idx and nnn not in nn_set
+            ]
+
+            if len(nnn_pairs) == 0:
+                # Fallback to NN hop when no NNN exists (tiny cells, etc.)
+                chosen_nn = random.choice(nn_indices)
+                nn_pos = atoms.positions[chosen_nn].copy()
+
+                atoms_new = atoms.copy()
+                del atoms_new[rm_idx]
+                new_nn_idx = chosen_nn if chosen_nn < rm_idx else chosen_nn - 1
+
+                disp_vector = np.zeros((len(atoms_new), 3))
+                disp_vector[new_nn_idx] = 0.5 * mic(vacancy_pos - nn_pos, cell)
+                atoms_new.info['reaction_type'] = 'vacancy'
+                images.append(atoms_new)
+                displacement_dicts.append(_maybe_gaussian(
+                    {"displacement_vector": disp_vector, "method": "vector"}, new_nn_idx))
+                selected_indices.append(rm_idx)
+                continue
+
+            chosen_nnn, _ = random.choice(nnn_pairs)
+            nnn_pos = atoms.positions[chosen_nnn].copy()
+
+            atoms_new = atoms.copy()
+            del atoms_new[rm_idx]
+            new_nnn_idx = chosen_nnn if chosen_nnn < rm_idx else chosen_nnn - 1
+
+            disp_vector = np.zeros((len(atoms_new), 3))
+            # NNN hops directly toward the vacancy (not toward via-NN)
+            disp_vector[new_nnn_idx] = 0.5 * mic(vacancy_pos - nnn_pos, cell)
+
+            atoms_new.info['reaction_type'] = 'vacancy'
+            images.append(atoms_new)
+            displacement_dicts.append(_maybe_gaussian(
+                {"displacement_vector": disp_vector, "method": "vector"}, new_nnn_idx))
+            selected_indices.append(rm_idx)
+
+        else:  # mechanism == 2
+            # Concerted 2-atom chain: NN→vacancy AND NNN→NN simultaneously.
+            chosen_nn = random.choice(nn_indices)
+            nn_pos = atoms.positions[chosen_nn].copy()
+
+            nn_set = set(nn_indices)
+            nnn_candidates = [int(n) for n in j_idx[i_idx == chosen_nn]
+                              if n != rm_idx and n not in nn_set]
+
+            atoms_new = atoms.copy()
+            del atoms_new[rm_idx]
+            new_nn_idx = chosen_nn if chosen_nn < rm_idx else chosen_nn - 1
+
+            disp_vector = np.zeros((len(atoms_new), 3))
+            disp_vector[new_nn_idx] = 0.5 * mic(vacancy_pos - nn_pos, cell)
+
+            if len(nnn_candidates) > 0:
+                chosen_nnn = random.choice(nnn_candidates)
+                nnn_pos = atoms.positions[chosen_nnn].copy()
+                new_nnn_idx = chosen_nnn if chosen_nnn < rm_idx else chosen_nnn - 1
+                disp_vector[new_nnn_idx] = 0.5 * mic(nn_pos - nnn_pos, cell)
+
+            atoms_new.info['reaction_type'] = 'vacancy'
+            images.append(atoms_new)
+            displacement_dicts.append(_maybe_gaussian(
+                {"displacement_vector": disp_vector, "method": "vector"}, new_nn_idx))
+            selected_indices.append(rm_idx)
 
     return images, displacement_dicts, selected_indices
 
@@ -220,55 +307,56 @@ def get_vacancy_attempts(atoms, config_dict, num_attempts):
 # --- Hop attempts (interstitial mechanism) ---
 
 def get_hop_reuse_attempts(atoms, num_attempts):
-    """Relocate an existing atom to an interstitial site, displace toward a neighbor site."""
+    """Displace an existing lattice atom halfway toward its nearest interstitial site.
+
+    No atoms are added or removed. The directed displacement gives the dimer a
+    physically motivated starting point for the interstitial hop transition state.
+    With 10% probability, Gaussian noise is used instead to allow discovery of
+    unexpected paths.
+    """
     atoms = turn_into_supercell(atoms)
     sites = find_interstitial_sites(atoms)
 
-    if len(sites) < 2:
-        warnings.warn("Found fewer than 2 interstitial sites; skipping hop_reuse.")
+    if len(sites) < 1:
+        warnings.warn("Found no interstitial sites; skipping hop_reuse.")
         return [], [], []
 
     cell = atoms.get_cell()
-    inv_cell = np.linalg.inv(cell)
+    positions = atoms.get_positions()
     weights = _get_atom_selection_weights(atoms)
+    site_idx_list = _shuffled_site_indices(len(sites), num_attempts)
 
     images = []
     displacement_dicts = []
     selected_indices = []
 
-    for _ in range(num_attempts):
+    for attempt in range(num_attempts):
         atom_idx = np.random.choice(len(atoms), p=weights)
+        atom_pos = positions[atom_idx]
 
-        # Pick site A (random)
-        site_a_idx = random.randrange(len(sites))
-        site_a = sites[site_a_idx]
+        # Use pre-shuffled site for diversity across attempts
+        site_a = sites[site_idx_list[attempt]]
+        delta = mic(site_a - atom_pos, cell)
 
-        # Pick site B (nearest other site to A)
-        other_sites = np.delete(sites, site_a_idx, axis=0)
-        _, delta_ab = _nearest_site(site_a, other_sites, cell, inv_cell)
-        direction = _safe_normalize(delta_ab)
-
-        # Build structure: move atom to site A
         atoms_new = atoms.copy()
-        atoms_new.positions[atom_idx] = site_a
         atoms_new.info['reaction_type'] = 'hop_reuse'
 
-        # Displacement vector: ~0.1 Å along direction, only for moved atom
         disp_vector = np.zeros((len(atoms_new), 3))
-        disp_vector[atom_idx] = 0.1 * direction
+        disp_vector[atom_idx] = 0.5 * delta
 
         images.append(atoms_new)
-        displacement_dicts.append({
-            "displacement_vector": disp_vector,
-            "method": "vector",
-        })
+        displacement_dicts.append(_maybe_gaussian(
+            {"displacement_vector": disp_vector, "method": "vector"}, atom_idx))
         selected_indices.append(int(atom_idx))
 
     return images, displacement_dicts, selected_indices
 
 
 def get_hop_insert_attempts(atoms, num_attempts):
-    """Insert a new small atom at an interstitial site, displace toward a neighbor site."""
+    """Insert a new small atom at an interstitial site, displace halfway to nearest neighbor site.
+
+    With 10% probability, Gaussian noise is used instead.
+    """
     atoms = turn_into_supercell(atoms)
     sites = find_interstitial_sites(atoms)
 
@@ -277,39 +365,32 @@ def get_hop_insert_attempts(atoms, num_attempts):
         return [], [], []
 
     cell = atoms.get_cell()
-    inv_cell = np.linalg.inv(cell)
+    site_idx_list = _shuffled_site_indices(len(sites), num_attempts)
 
     images = []
     displacement_dicts = []
     selected_indices = []
 
-    for _ in range(num_attempts):
+    for attempt in range(num_attempts):
         element_z = _sample_hop_insert_element()
 
-        # Pick site A (random)
-        site_a_idx = random.randrange(len(sites))
+        site_a_idx = site_idx_list[attempt]
         site_a = sites[site_a_idx]
 
-        # Pick site B (nearest other site to A)
         other_sites = np.delete(sites, site_a_idx, axis=0)
-        _, delta_ab = _nearest_site(site_a, other_sites, cell, inv_cell)
-        direction = _safe_normalize(delta_ab)
+        site_b, delta_ab = _nearest_site(site_a, other_sites, cell)
 
-        # Build structure: add new atom at site A
         atoms_new = atoms.copy()
         atoms_new.append(Atom(element_z, position=site_a))
         new_atom_idx = len(atoms_new) - 1
         atoms_new.info['reaction_type'] = 'hop_insert'
 
-        # Displacement vector: ~0.1 Å along direction, only for inserted atom
         disp_vector = np.zeros((len(atoms_new), 3))
-        disp_vector[new_atom_idx] = 0.1 * direction
+        disp_vector[new_atom_idx] = 0.5 * delta_ab
 
         images.append(atoms_new)
-        displacement_dicts.append({
-            "displacement_vector": disp_vector,
-            "method": "vector",
-        })
+        displacement_dicts.append(_maybe_gaussian(
+            {"displacement_vector": disp_vector, "method": "vector"}, new_atom_idx))
         selected_indices.append(int(new_atom_idx))
 
     return images, displacement_dicts, selected_indices
@@ -317,20 +398,18 @@ def get_hop_insert_attempts(atoms, num_attempts):
 
 # --- Kickout attempts (interstitialcy / kick-out mechanism) ---
 
-def _find_nearest_lattice_atom(site, atoms, cell, inv_cell):
-    """Return the index of the lattice atom nearest to an interstitial site (MIC)."""
-    deltas = _mic_vector(atoms.get_positions() - site, cell, inv_cell)
-    dists = np.linalg.norm(deltas, axis=1)
-    return int(np.argmin(dists))
-
-
 def get_kickout_reuse_attempts(atoms, num_attempts):
-    """Existing atom placed at interstitial site kicks nearest lattice atom into another site.
+    """Interstitialcy kick-out using only existing atoms (no atoms added or removed).
 
-    1. Pick an existing atom (weighted by inverse covalent radius), move it to site A.
-    2. Find the nearest lattice atom to site A — this is the atom being kicked.
-    3. The kicked atom is displaced toward site B (nearest interstitial site to it).
-    4. The kicking atom is displaced toward the kicked atom's original position.
+    For each attempt:
+    1. Pick an interstitial site A.
+    2. The atom nearest to site A is the 'kicked' atom — it will be displaced toward
+       site B (nearest other interstitial site), as if pushed out of the way.
+    3. A separate 'kicker' atom (randomly selected, weighted by inverse covalent radius,
+       excluding the kicked atom) is displaced toward site A.
+
+    The original lattice structure is preserved in frame 0; only the displacement
+    vectors encode the mechanism. With 10% probability, Gaussian noise is used instead.
     """
     atoms = turn_into_supercell(atoms)
     sites = find_interstitial_sites(atoms)
@@ -340,58 +419,42 @@ def get_kickout_reuse_attempts(atoms, num_attempts):
         return [], [], []
 
     cell = atoms.get_cell()
-    inv_cell = np.linalg.inv(cell)
+    positions = atoms.get_positions()
     weights = _get_atom_selection_weights(atoms)
+    site_idx_list = _shuffled_site_indices(len(sites), num_attempts)
 
     images = []
     displacement_dicts = []
     selected_indices = []
 
-    for _ in range(num_attempts):
-        # Pick the atom to become the interstitial (kicker)
-        kicker_idx = np.random.choice(len(atoms), p=weights)
-
-        # Pick site A for the kicker
-        site_a_idx = random.randrange(len(sites))
+    for attempt in range(num_attempts):
+        site_a_idx = site_idx_list[attempt]
         site_a = sites[site_a_idx]
 
-        # Build structure: move kicker to site A
-        atoms_new = atoms.copy()
-        atoms_new.positions[kicker_idx] = site_a
+        # Sort all atoms by distance to site A.
+        # Nearest  → kicked (gets displaced when the kicker arrives at site A).
+        # 2nd nearest → kicker (hops into site A, physically close so displacement is sensible).
+        dists_to_a = np.linalg.norm(mic(positions - site_a, cell), axis=1)
+        sorted_by_dist = np.argsort(dists_to_a)
+        kicked_idx = int(sorted_by_dist[0])
+        kicker_idx = int(sorted_by_dist[1])
+        kicked_pos = positions[kicked_idx]
+        kicker_pos = positions[kicker_idx]
 
-        # Find the nearest lattice atom to site A (the one being kicked)
-        # Exclude the kicker itself
-        positions = atoms_new.get_positions()
-        deltas = _mic_vector(positions - site_a, cell, inv_cell)
-        dists = np.linalg.norm(deltas, axis=1)
-        dists[kicker_idx] = np.inf  # exclude kicker
-        kicked_idx = int(np.argmin(dists))
-        kicked_original_pos = positions[kicked_idx].copy()
-
-        # Find site B: nearest interstitial site to the kicked atom (exclude site A)
+        # Site B: nearest interstitial to kicked atom (exclude site A)
         other_sites = np.delete(sites, site_a_idx, axis=0)
-        site_b, _ = _nearest_site(kicked_original_pos, other_sites, cell, inv_cell)
+        site_b, _ = _nearest_site(kicked_pos, other_sites, cell)
 
-        # Direction for kicked atom: from its position toward site B
-        delta_kicked = _mic_vector(site_b - kicked_original_pos, cell, inv_cell)
-        dir_kicked = _safe_normalize(delta_kicked)
-
-        # Direction for kicker: from site A toward kicked atom's original position
-        delta_kicker = _mic_vector(kicked_original_pos - site_a, cell, inv_cell)
-        dir_kicker = _safe_normalize(delta_kicker)
-
+        atoms_new = atoms.copy()
         atoms_new.info['reaction_type'] = 'kickout_reuse'
 
-        # Two-atom displacement
         disp_vector = np.zeros((len(atoms_new), 3))
-        disp_vector[kicker_idx] = 0.1 * dir_kicker
-        disp_vector[kicked_idx] = 0.1 * dir_kicked
+        disp_vector[kicker_idx] = 0.5 * mic(site_a - kicker_pos, cell)
+        disp_vector[kicked_idx] = 0.5 * mic(site_b - kicked_pos, cell)
 
         images.append(atoms_new)
-        displacement_dicts.append({
-            "displacement_vector": disp_vector,
-            "method": "vector",
-        })
+        displacement_dicts.append(_maybe_gaussian(
+            {"displacement_vector": disp_vector, "method": "vector"}, kicker_idx))
         selected_indices.append(int(kicker_idx))
 
     return images, displacement_dicts, selected_indices
@@ -403,8 +466,9 @@ def get_kickout_insert_attempts(atoms, num_attempts):
     1. Sample a new element with covalent radius similar to host (Gaussian weight).
     2. Insert it at interstitial site A.
     3. Find the nearest lattice atom — this is the atom being kicked.
-    4. The kicked atom is displaced toward site B.
-    5. The inserted atom is displaced toward the kicked atom's original position.
+    4. Inserted atom displaced halfway toward kicked atom's position.
+    5. Kicked atom displaced halfway toward site B.
+    With 10% probability, Gaussian noise is used instead.
     """
     atoms = turn_into_supercell(atoms)
     sites = find_interstitial_sites(atoms)
@@ -414,57 +478,45 @@ def get_kickout_insert_attempts(atoms, num_attempts):
         return [], [], []
 
     cell = atoms.get_cell()
-    inv_cell = np.linalg.inv(cell)
+    positions = atoms.get_positions()
+    site_idx_list = _shuffled_site_indices(len(sites), num_attempts)
 
     images = []
     displacement_dicts = []
     selected_indices = []
 
-    for _ in range(num_attempts):
+    for attempt in range(num_attempts):
         element_z = _sample_kickout_insert_element(atoms)
 
-        # Pick site A
-        site_a_idx = random.randrange(len(sites))
+        site_a_idx = site_idx_list[attempt]
         site_a = sites[site_a_idx]
 
-        # Find nearest lattice atom to site A (the one being kicked)
-        kicked_idx = _find_nearest_lattice_atom(site_a, atoms, cell, inv_cell)
-        kicked_original_pos = atoms.get_positions()[kicked_idx].copy()
+        # Kicked: nearest lattice atom to site A
+        dists_to_a = np.linalg.norm(mic(positions - site_a, cell), axis=1)
+        kicked_idx = int(np.argmin(dists_to_a))
+        kicked_pos = positions[kicked_idx]
 
-        # Find site B: nearest interstitial site to kicked atom (exclude site A)
         other_sites = np.delete(sites, site_a_idx, axis=0)
-        site_b, _ = _nearest_site(kicked_original_pos, other_sites, cell, inv_cell)
+        site_b, _ = _nearest_site(kicked_pos, other_sites, cell)
 
-        # Direction for kicked atom: toward site B
-        delta_kicked = _mic_vector(site_b - kicked_original_pos, cell, inv_cell)
-        dir_kicked = _safe_normalize(delta_kicked)
-
-        # Direction for inserted atom: toward kicked atom's original position
-        delta_insert = _mic_vector(kicked_original_pos - site_a, cell, inv_cell)
-        dir_insert = _safe_normalize(delta_insert)
-
-        # Build structure: insert new atom at site A
         atoms_new = atoms.copy()
         atoms_new.append(Atom(element_z, position=site_a))
         inserted_idx = len(atoms_new) - 1
         atoms_new.info['reaction_type'] = 'kickout_insert'
 
-        # Two-atom displacement
         disp_vector = np.zeros((len(atoms_new), 3))
-        disp_vector[inserted_idx] = 0.1 * dir_insert
-        disp_vector[kicked_idx] = 0.1 * dir_kicked
+        disp_vector[inserted_idx] = 0.5 * mic(kicked_pos - site_a, cell)
+        disp_vector[kicked_idx] = 0.5 * mic(site_b - kicked_pos, cell)
 
         images.append(atoms_new)
-        displacement_dicts.append({
-            "displacement_vector": disp_vector,
-            "method": "vector",
-        })
+        displacement_dicts.append(_maybe_gaussian(
+            {"displacement_vector": disp_vector, "method": "vector"}, inserted_idx))
         selected_indices.append(int(inserted_idx))
 
     return images, displacement_dicts, selected_indices
 
 
-# --- Exchange / Ring attempts (coordinated position swaps) ---
+# --- Ring attempts (coordinated position swaps; ring_size=2 covers pairwise exchange) ---
 
 def _find_ring(neighbors_dict, seed, ring_size, max_retries=50):
     """Find a ring of connected atoms starting from seed.
@@ -489,16 +541,14 @@ def _find_ring(neighbors_dict, seed, ring_size, max_retries=50):
             current = path[-1]
             nbrs = neighbors_dict.get(current, [])
             if step == ring_size - 2:
-                # Last step: pick an unvisited neighbor that is also a neighbor of seed
+                # Last step: must close the ring back to seed
                 candidates = [n for n in nbrs if n not in path and n in seed_neighbors]
             else:
-                # Pick an unvisited neighbor (excluding seed to avoid short-circuit)
                 candidates = [n for n in nbrs if n not in path]
             if not candidates:
                 break
             path.append(random.choice(candidates))
         else:
-            # path has ring_size entries, all unique, and last is a neighbor of seed
             return path
 
     return None
@@ -513,7 +563,7 @@ def _build_neighbor_dict(atoms, cutoff=3.5):
     return neighbors_dict
 
 
-def _make_ring_attempt(atoms, neighbors_dict, cell, inv_cell, ring_size, reaction_type):
+def _make_ring_attempt(atoms, neighbors_dict, cell, ring_size, reaction_type):
     """Create a single ring swap attempt. Returns (image, disp_dict, index) or None."""
     seed = random.randrange(len(atoms))
     ring = _find_ring(neighbors_dict, seed, ring_size)
@@ -526,38 +576,37 @@ def _make_ring_attempt(atoms, neighbors_dict, cell, inv_cell, ring_size, reactio
     positions = atoms_new.get_positions()
     disp_vector = np.zeros_like(positions)
 
-    for k in range(len(ring)):
-        src = ring[k]
-        dst = ring[(k + 1) % len(ring)]
-        delta = _mic_vector(positions[dst] - positions[src], cell, inv_cell)
-        disp_vector[src] = 0.1 * _safe_normalize(delta)
+    if len(ring) == 2:
+        # Exchange: atoms head directly toward each other along the same line.
+        # Add a perpendicular component so they dodge to OPPOSITE sides — otherwise
+        # both atoms end up at the same midpoint and overlap.
+        delta = mic(positions[ring[1]] - positions[ring[0]], cell)
+        delta_hat = delta / np.linalg.norm(delta)
+        ref = np.array([1.0, 0.0, 0.0])
+        if abs(np.dot(delta_hat, ref)) > 0.9:
+            ref = np.array([0.0, 1.0, 0.0])
+        perp = np.cross(delta_hat, ref)
+        perp = (perp / np.linalg.norm(perp)) * 0.15 * np.linalg.norm(delta) * random.choice([-1, 1])
+        # ring[0] gets +perp, ring[1] gets -perp → they separate at the midpoint
+        disp_vector[ring[0]] = 0.5 * delta + perp
+        disp_vector[ring[1]] = -0.5 * delta - perp
+    else:
+        for k in range(len(ring)):
+            src = ring[k]
+            dst = ring[(k + 1) % len(ring)]
+            disp_vector[src] = 0.5 * mic(positions[dst] - positions[src], cell)
 
     atoms_new.info['reaction_type'] = reaction_type
-
-    return (atoms_new,
-            {"displacement_vector": disp_vector, "method": "vector"},
-            int(ring[0]))
-
-
-def get_exchange_attempts(atoms, num_attempts):
-    """Two neighboring atoms swap positions (ring_size=2)."""
-    atoms = turn_into_supercell(atoms)
-    neighbors_dict = _build_neighbor_dict(atoms)
-    cell = atoms.get_cell()
-    inv_cell = np.linalg.inv(cell)
-
-    images, displacement_dicts, selected_indices = [], [], []
-    for _ in range(num_attempts):
-        result = _make_ring_attempt(atoms, neighbors_dict, cell, inv_cell, 2, 'exchange')
-        if result:
-            images.append(result[0])
-            displacement_dicts.append(result[1])
-            selected_indices.append(result[2])
-    return images, displacement_dicts, selected_indices
+    disp_dict = {"displacement_vector": disp_vector, "method": "vector"}
+    return (atoms_new, _maybe_gaussian(disp_dict, int(ring[0])), int(ring[0]))
 
 
 def get_ring_attempts(atoms, config_dict, num_attempts):
-    """Ring of 3+ atoms rotate cooperatively. Ring size randomly sampled from config."""
+    """Cooperative ring rotation. Ring size is randomly sampled from config ring_sizes.
+
+    ring_sizes = 2 3 4   # includes 2 → also covers pairwise exchange
+    ring_sizes = 3 4     # only true rings (no exchange)
+    """
     ring_sizes = config_dict["ourDimer"].get("ring_sizes", [3, 4])
     if isinstance(ring_sizes, (int, float)):
         ring_sizes = [int(ring_sizes)]
@@ -569,12 +618,11 @@ def get_ring_attempts(atoms, config_dict, num_attempts):
     atoms = turn_into_supercell(atoms)
     neighbors_dict = _build_neighbor_dict(atoms)
     cell = atoms.get_cell()
-    inv_cell = np.linalg.inv(cell)
 
     images, displacement_dicts, selected_indices = [], [], []
     for _ in range(num_attempts):
         size = random.choice(ring_sizes)
-        result = _make_ring_attempt(atoms, neighbors_dict, cell, inv_cell, size, 'ring')
+        result = _make_ring_attempt(atoms, neighbors_dict, cell, size, 'ring')
         if result:
             images.append(result[0])
             displacement_dicts.append(result[1])
@@ -590,7 +638,6 @@ _REACTION_TYPE_DISPATCH = {
     "hop_insert": lambda atoms, config_dict, n: get_hop_insert_attempts(atoms, n),
     "kickout_reuse": lambda atoms, config_dict, n: get_kickout_reuse_attempts(atoms, n),
     "kickout_insert": lambda atoms, config_dict, n: get_kickout_insert_attempts(atoms, n),
-    "exchange": lambda atoms, config_dict, n: get_exchange_attempts(atoms, n),
     "ring": lambda atoms, config_dict, n: get_ring_attempts(atoms, config_dict, n),
 }
 
@@ -605,7 +652,6 @@ def get_attempts(atoms, config_dict):
 
     if config_dict["ourDimer"]["dataset_type"] == "bulk":
 
-        # Determine reaction types and per-type attempt count
         reaction_types = config_dict["ourDimer"].get("reaction_types")
         if reaction_types is None:
             raise ValueError("Configuration error: 'ourDimer' -> 'reaction_types' is not set. "
@@ -648,11 +694,11 @@ def get_attempts(atoms, config_dict):
         mask[unique_neighbors] = True
         mask = mask.tolist()
 
-        num_needed = config_dict["ourDimer"]["num_attempts"]//3
+        num_needed = config_dict["ourDimer"]["num_attempts"] // 3
         if len(adsorbate_indices) >= num_needed:
             chosen_indices = random.sample(list(adsorbate_indices), num_needed)
         else:
-            chosen_indices = list(adsorbate_indices) * int(num_needed//len(adsorbate_indices))
+            chosen_indices = list(adsorbate_indices) * int(num_needed // len(adsorbate_indices))
             remainder = num_needed % len(adsorbate_indices)
             chosen_indices.extend(random.sample(list(adsorbate_indices), remainder))
 
@@ -662,9 +708,9 @@ def get_attempts(atoms, config_dict):
             if i < num_needed:
                 displacement_dicts.append({"displacement_center": int(chosen_indices[i])})
                 selected_indices.append(int(chosen_indices[i]))
-            elif num_needed <= i < 2*num_needed:
-                displacement_dicts.append({"displacement_center": int(chosen_indices[i-num_needed]), "gauss_std":0.2, "number_of_atoms":1})
-                selected_indices.append(int(chosen_indices[i-num_needed]))
+            elif num_needed <= i < 2 * num_needed:
+                displacement_dicts.append({"displacement_center": int(chosen_indices[i - num_needed]), "gauss_std": 0.2, "number_of_atoms": 1})
+                selected_indices.append(int(chosen_indices[i - num_needed]))
             else:
                 displacement_dicts.append({"mask": mask})
                 selected_indices.append(-1)
