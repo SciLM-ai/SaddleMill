@@ -1099,7 +1099,7 @@ def get_shortest_path(
     # Tile the atoms so all placements about the center cell are considered.
     ## For the final frame
     vectors = [
-        v for v in final.cell if ((round(v[0], 3) != 0) or (round(v[1], 3 != 0)))
+        v for v in final.cell if ((round(v[0], 3) != 0) or (round(v[1], 3) != 0))
     ]
     repeats = list(product([-1, 0, 1], repeat=2))
     repeats.remove((0, 0))

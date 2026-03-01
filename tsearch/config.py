@@ -235,7 +235,7 @@ def get_trajes_and_indices(config_dict):
         nimages = 1
 
     trajes_and_idxs = []
-    for i,traj_name in enumerate(all_traj_files):
+    for i, traj_name in enumerate(all_traj_files):
         if config_dict["ourNEB"]["images_location_in_input_traj"] == 0:
             trajes_and_idxs.append([traj_name, 0, nimages])
         elif config_dict["ourNEB"]["images_location_in_input_traj"] == -1:
@@ -243,8 +243,8 @@ def get_trajes_and_indices(config_dict):
         elif config_dict["ourNEB"]["images_location_in_input_traj"] == ":":
             traj_len = traj_lens[i]
             if traj_len%nimages != 0: raise ValueError(f"Can't divide a traj file with {traj_len} atoms objects into batches of {nimages} atoms objects")
-            for i in range(traj_len//nimages):
-                trajes_and_idxs.append([traj_name, i*nimages, (i+1)*nimages])
+            for j in range(traj_len//nimages):
+                trajes_and_idxs.append([traj_name, j*nimages, (j+1)*nimages])
     
     return trajes_and_idxs
 
@@ -274,8 +274,11 @@ def get_remaining_trajes(trajes_and_idxs, config_dict):
     status_df = get_previous_job_status_df(config_dict)
     successful_jobs = status_df[status_df.iloc[:, -1] != "error"]
     ids_to_skip = set(successful_jobs.iloc[:, 0])
-    job_IDs, trajes_and_idxs = zip(*[[i,item] for i, item in enumerate(trajes_and_idxs) if i not in ids_to_skip])
-    return job_IDs, trajes_and_idxs
+    remaining = [[i, item] for i, item in enumerate(trajes_and_idxs) if i not in ids_to_skip]
+    if not remaining:
+        return [], []
+    job_IDs, trajes_and_idxs = zip(*remaining)
+    return list(job_IDs), list(trajes_and_idxs)
 
 
 def get_flux_resources(config_dict):
