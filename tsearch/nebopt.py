@@ -1,4 +1,5 @@
 import os
+import sys
 import shutil
 import traceback
 import matplotlib
@@ -13,9 +14,15 @@ from ase.mep.neb import NEB, NEBTools, NEBState
 from tsearch.catsunami.ocpneb import OCPNEB
 
 
-def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
+def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, executorlib_worker_id=None):
 
     rank = executorlib_worker_id
+
+    max_consecutive_errors = config_dict["Main"]["max_consecutive_errors"]
+    if consecutive_errors is not None and consecutive_errors[0] >= max_consecutive_errors > 0:
+        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. Killing worker for restart.")
+        sys.exit(1)
+
     relax_endpoints = config_dict["ourNEB"]["relax_endpoints"]
     interpolate_method = config_dict["ourNEB"]["interpolate_method"]  # this is idpp implementation from Meta OCP, other choises are "ase_idpp" and "ase_linear" or False if you already have a frame set
     perform_aseidpp = False
@@ -198,6 +205,9 @@ def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
         else:
             log_status("not_converged")
 
+        if consecutive_errors is not None:
+            consecutive_errors[0] = 0
+
         # Clean up temp files
         if config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"):
             for image_idx in range(num_frames):
@@ -222,6 +232,8 @@ def nebopt(i, config_dict, images, calc, Optimizer, executorlib_worker_id=None):
     except Exception as e:
         print(f"Rank {rank} FAILED on structure {i}: {e}")
         print(f"\nTraceback details:\n{traceback.format_exc()}")
+        if consecutive_errors is not None:
+            consecutive_errors[0] += 1
         if config_dict["Main"]["Calculator"] == "VaspInteractive":
             from vasp_interactive import VaspInteractive
             for image in images:

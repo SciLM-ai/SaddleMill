@@ -56,6 +56,7 @@ def main():
                 "num_nodes": 1,
                 "error_log_file": "error",
                 "cwd": os.getcwd(),
+                "restart_limit": config_dict["Main"]["restart_limit"],
             }
         )
         # 'exe' will be the executor instance

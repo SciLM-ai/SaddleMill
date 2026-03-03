@@ -26,4 +26,4 @@ def init_function(executorlib_worker_id=None):
         calc = calc(**config_dict[config_dict["Main"]["Calculator"]])
     Optimizer = load_optimizer(config_dict)
 
-    return {"calc": calc, "Optimizer": Optimizer}
+    return {"calc": calc, "Optimizer": Optimizer, "consecutive_errors": [0]}

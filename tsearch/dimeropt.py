@@ -1,4 +1,5 @@
 import os
+import sys
 import traceback
 import random
 import zipfile
@@ -17,7 +18,7 @@ class StopRun(Exception):
     pass
 
 
-def dimeropt(i, config_dict, atoms_orig, calc, executorlib_worker_id=None, **kwargs):
+def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executorlib_worker_id=None, **kwargs):
 
     rank = executorlib_worker_id
     random.seed(i)
@@ -28,11 +29,18 @@ def dimeropt(i, config_dict, atoms_orig, calc, executorlib_worker_id=None, **kwa
     my_output_file = f"{method_name}_trajes/collected_ts_rank_{rank}.traj"
     zip_name = f"{method_name}_debug_zips/structure_rank_{rank}_data.zip"
 
+    max_consecutive_errors = config_dict["Main"]["max_consecutive_errors"]
+    if consecutive_errors is not None and consecutive_errors[0] >= max_consecutive_errors > 0:
+        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. Killing worker for restart.")
+        sys.exit(1)
+
     def log_status(attempt, slctd_indx, status_msg):
         with open(status_file, 'a') as f:
             f.write(f"{i},{rank},{attempt},{slctd_indx},{status_msg}\n")
 
     # --- MAIN LOOP ---
+    any_attempt_succeeded = False
+
     with Trajectory(my_output_file, 'a') as writer:
 
         attempt = "init"
@@ -140,6 +148,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, executorlib_worker_id=None, **kwa
                 writer.write(atoms)
 
                 log_status(attempt, slctd_indx, status)
+                any_attempt_succeeded = True
 
                 # Clean up temp files
                 existing_files = [f for f in temp_files if os.path.exists(f)]
@@ -161,3 +170,10 @@ def dimeropt(i, config_dict, atoms_orig, calc, executorlib_worker_id=None, **kwa
                     for f_name in existing_files:
                         os.remove(f_name)
                 log_status(attempt, slctd_indx, "error")
+
+    # Track consecutive structure-level errors for worker health
+    if consecutive_errors is not None:
+        if any_attempt_succeeded:
+            consecutive_errors[0] = 0
+        else:
+            consecutive_errors[0] += 1

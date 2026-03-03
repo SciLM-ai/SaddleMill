@@ -52,7 +52,7 @@ catsunami/ocpneb.py  (OCPNEB: batched NEB with swDNEB switching)
 ### `nebopt.py` - NEB Workflow
 1. **Endpoint relaxation** (optional): Relaxes reactant/product with configurable optimizer (e.g., LBFGS). For VaspInteractive, calculators are finalized after relaxation and endpoints are frozen with `SinglePointCalculator`.
 2. **Interpolation**: `ocp_idpp` (Meta's PBC-aware), `ase_idpp`, `ase_linear` (auto-falls back to IDPP on atom overlap), or `False` (use provided frames)
-3. **NEB optimization**: Uses `OCPNEB` class with MDMin optimizer. Supports climbing image. For VASP/VaspInteractive, each image gets its own calculator instance with separate working directories (`{job_id}_{image_idx}/`), separate `command`/`ncore` settings for endpoints vs intermediates, and WAVECAR/CHG/CHGCAR cleanup after completion.
+3. **NEB optimization**: Uses `OCPNEB` class with MDMin optimizer. Supports climbing image. For VASP/VaspInteractive, each image gets its own calculator instance with separate working directories (`VASP_{job_id}_{image_idx}/`), separate `command`/`ncore` settings for endpoints vs intermediates, and WAVECAR/CHG/CHGCAR cleanup after completion.
 4. **Output**: Extracts critical image (TS candidate) with tangent vector as eigenmode, barrier height, and reaction energetics. Generates band plot PNG.
 
 ### `catsunami/ocpneb.py` - Core NEB Engine
@@ -72,6 +72,8 @@ catsunami/ocpneb.py  (OCPNEB: batched NEB with swDNEB switching)
 - Convergence checks every 5 steps: participation ratio (delocalization) and desorption detection
 - Extension check if initial convergence fails
 - Writes `reaction_type` to `atoms.info` for each attempt
+- **Per-attempt error handling**: Each dimer attempt has its own try/except, so one failing attempt does not abort remaining attempts for the same structure
+- **Consecutive error tracking**: Tracks structure-level errors via `consecutive_errors` counter (passed from `init_function`). If all attempts for a structure fail, counter increments; any successful attempt resets it to 0. When counter reaches `max_consecutive_errors`, worker calls `sys.exit(1)` to trigger executorlib restart (see Worker Health section)
 
 ### `dimertools/structure_edit.py` - Bulk Reaction Types for Dimer
 Bulk dimer mode supports 6 reaction types, configured via `reaction_types` (space-separated list):
@@ -90,8 +92,11 @@ Bulk dimer mode supports 6 reaction types, configured via `reaction_types` (spac
 - `_mic_vector()` / `_nearest_site()`: Minimum image convention helpers for periodic distance calculations.
 - `_find_ring(neighbors_dict, seed, ring_size)`: Finds closed rings of connected atoms in the neighbor graph via constrained random walk. Ring size=2 handles pairwise exchange, ring size>=3 handles cooperative ring rotations.
 - Element sampling: `hop_insert` uses small atoms weighted by 1/covalent_radius (H heavily favored). `kickout_insert` uses Gaussian weight centered on host avg covalent radius (σ=0.2 Å) from a pool of 30 common metals/semiconductors.
-- `turn_into_supercell(atoms)`: Preserves `.info` across `make_supercell()` (ASE's `make_supercell` drops `.info`).
+- `turn_into_supercell(atoms, min_length=7.0)`: Preserves `.info` across `make_supercell()` (ASE's `make_supercell` drops `.info`). Enforces minimum cell dimension of 7 Å in each periodic direction to avoid self-interaction artifacts through PBC (important for fairchem's radius graph which uses a 5 Å cutoff).
 - Dispatch: `_REACTION_TYPE_DISPATCH` dict maps type names to functions. `get_attempts()` iterates over configured types.
+- `_safe_normalize(vec)`: Normalizes a vector; returns a random unit vector if norm is near zero (prevents division-by-zero in ring displacement calculations).
+- `_build_neighbor_dict(atoms)`: Builds neighbor graph; skips self-interactions (`i == j`) which can occur in small periodic cells.
+- Defensive guards throughout: zero-weight fallback in `_sample_kickout_insert_element`, empty `ring_sizes` early return, missing adsorbate atoms early return in OC mode.
 - Backward compatible: default `reaction_types = vacancy` reproduces original behavior exactly.
 
 ### `geomopt.py` - Geometry Optimization
@@ -100,6 +105,7 @@ Bulk dimer mode supports 6 reaction types, configured via `reaction_types` (spac
 
 ### `tools.py` - Utilities
 - `load_and_sanitize(traj, i, j)`: Loads atoms from trajectory and stashes original `.info` into `atoms.info = {"orig_info": <original_info>}`. This prevents per-atom array data (e.g. `forces`, `stress`) from causing size mismatches when atoms are later added/removed (e.g. vacancy in Dimer). Called in `__main__.py` for all methods uniformly.
+- `clean_up_files(config_dict)`: Removes leftover temp files on resume. Method-aware: cleans NEB files (`neb_*.log`, `neb_*.traj`, `reactant_relaxation_*`, `product_relaxation_*`, `diffusion_barrier_*.png`), Dimer files (`dimer_control_*.log`, `dimer_opt_*.log`, `dimer_*.traj`), or Minimization files (`optimization_*.log`, `optimization_*.traj`). For VASP NEB, also removes `VASP_*_*/` per-image directories.
 - Bond detection via ASE neighbor_list with natural cutoffs
 - `check_reaction()` / `check_adsorbate_reaction()`: Compare connectivity between structures
 
@@ -108,7 +114,7 @@ Bulk dimer mode supports 6 reaction types, configured via `reaction_types` (spac
 - Sets `CUDA_VISIBLE_DEVICES` for multi-job-per-GPU scenarios (skipped for VASP calculators)
 - For FAIRChem: instantiates calculator once (stored on GPU, shared across structures)
 - For VASP/VaspInteractive: returns the class itself (instantiation deferred to per-image in `nebopt.py`)
-- Returns `{calc, Optimizer}` dict passed to method functions
+- Returns `{calc, Optimizer, consecutive_errors}` dict passed to method functions. `consecutive_errors` is `[0]` (mutable list used as an in-memory counter); resets naturally on worker restart (fresh process)
 
 ### `catsunami/autoframe.py` - NEB Frame Generation
 - `AutoFrameDissociation` / `AutoFrameTransfer`: Generates NEB initial/final frames from reaction databases
@@ -132,6 +138,8 @@ jobs_per_gpu = 1            # Number of concurrent jobs per GPU
 Calculator = FAIRChemCalculator  # FAIRChemCalculator | Vasp | VaspInteractive
 resume = False              # Resume from previous partial run
 zip = True                  # Compress debug files
+max_consecutive_errors = 5  # Kill worker after N consecutive structures all-error (0 = disabled)
+restart_limit = 3           # executorlib: max worker restarts before permanent death (0 = no restarts)
 
 [FAIRChemCalculator]
 device = cuda
@@ -226,6 +234,17 @@ Each TS image in the output trajectory contains:
 
 **Serial (executorlib=False)**: Runs jobs one at a time on a single GPU. Useful for debugging.
 
+## Worker Health and Automatic Restart
+
+CUDA device-side asserts (e.g., from fairchem's `radius_graph_pbc_v2` on degenerate structures) permanently poison the GPU context — every subsequent CUDA operation fails. To handle this:
+
+1. **In-memory tracking**: `init_function` creates `consecutive_errors = [0]`. Each method function increments it when all attempts for a structure error, resets to 0 on any success.
+2. **Worker self-kill**: When `consecutive_errors[0] >= max_consecutive_errors`, the method function calls `sys.exit(1)` before processing the next structure.
+3. **executorlib restart**: `restart_limit` (default 3) in the `resource_dict` tells executorlib to restart the crashed worker. A new Flux job is submitted (potentially on a different node/GPU), `init_function` re-runs (fresh CUDA context, fresh calculator, `consecutive_errors` reset to `[0]`), and the failed task is automatically requeued.
+4. **Exhaustion**: After `restart_limit` restarts, the worker is permanently dead and remaining tasks assigned to it receive `ExecutorlibSocketError`.
+
+**Note**: On restart, Flux may allocate a different node/GPU. The `worker_id` is preserved, but `CUDA_VISIBLE_DEVICES` assignment in `init_function` may compute incorrectly if `jobs_per_gpu > 1` and the new node has a different GPU count. For `jobs_per_gpu = 1` (the common case), this is not an issue since executorlib's own `gpus_per_core=1` handles GPU allocation.
+
 ## HPC Setup (Perlmutter)
 
 ```bash
@@ -242,7 +261,7 @@ Set `FAIRCHEM_CACHE_DIR` for model caching. Requires CUDA libraries in `LD_LIBRA
 The NEB method supports VASP and VaspInteractive as alternatives to FAIRChemCalculator. Key design differences:
 
 - **No batching**: Unlike FAIRChem (which batch-evaluates all intermediate images on GPU), VASP runs each image as a separate process. `OCPNEB` delegates to the parent `BaseNEB` force evaluation when `vasp=True`.
-- **Per-image calculator instances**: Each NEB image gets its own calculator with a unique working directory (`{job_id}_{image_idx}/`). Endpoints and intermediates can use different `command`/`ncore` settings (e.g., more cores for endpoint relaxation).
+- **Per-image calculator instances**: Each NEB image gets its own calculator with a unique working directory (`VASP_{job_id}_{image_idx}/`). The `VASP_` prefix makes these directories easy to identify and safely glob for cleanup on resume. Endpoints and intermediates can use different `command`/`ncore` settings (e.g., more cores for endpoint relaxation).
 - **Deferred instantiation**: `load_calculator()` returns the VASP class (not an instance). Calculators are instantiated per-image in `nebopt.py` with directory, command, ncore, and `[Vasp]` INCAR parameters.
 - **VaspInteractive lifecycle**: VaspInteractive keeps a persistent VASP process. Endpoint calculators are finalized after relaxation (before replacing with `SinglePointCalculator`). Intermediate calculators are finalized after the NEB run completes.
 - **Cleanup**: WAVECAR, CHG, CHGCAR files are removed after each job (both success and error paths) to avoid disk bloat. Image directories are added to `temp_files` for zip archival.

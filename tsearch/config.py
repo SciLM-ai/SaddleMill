@@ -19,6 +19,8 @@ class ConfigManager:
             "jobs_per_gpu": 1,
             "resume": True,
             "zip": True,
+            "max_consecutive_errors": 5,
+            "restart_limit": 3,
         },
         "FAIRChemCalculator": {
             "device": 'cuda',

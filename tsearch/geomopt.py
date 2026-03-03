@@ -1,4 +1,5 @@
 import os
+import sys
 import traceback
 import zipfile
 from ase.io import Trajectory
@@ -14,9 +15,15 @@ def relax_structure(config_dict, optimizable, logfile, trajfile, Optimizer):
     return converged
 
 
-def geomopt(i, config_dict, atoms, calc, Optimizer, executorlib_worker_id=None):
+def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, executorlib_worker_id=None):
 
     rank = executorlib_worker_id
+
+    max_consecutive_errors = config_dict["Main"]["max_consecutive_errors"]
+    if consecutive_errors is not None and consecutive_errors[0] >= max_consecutive_errors > 0:
+        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. Killing worker for restart.")
+        sys.exit(1)
+
     atoms.calc = calc
 
     method_name = config_dict["Main"]["method"]
@@ -49,6 +56,9 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, executorlib_worker_id=None):
 
             writer.write(atoms)
 
+            if consecutive_errors is not None:
+                consecutive_errors[0] = 0
+
             # Clean up temp files
             existing_files = [f for f in temp_files if os.path.exists(f)]
             if existing_files and config_dict['Main']['zip']:
@@ -63,6 +73,8 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, executorlib_worker_id=None):
         except Exception as e:
             print(f"Rank {rank} FAILED on structure {i}: {e}")
             print(f"\nTraceback details:\n{traceback.format_exc()}")
+            if consecutive_errors is not None:
+                consecutive_errors[0] += 1
             existing_files = [f for f in temp_files if os.path.exists(f)]
             if existing_files and config_dict['Main']['zip']:
                 with zipfile.ZipFile(zip_name, 'a', zipfile.ZIP_DEFLATED) as zf:
@@ -70,12 +82,18 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, executorlib_worker_id=None):
                         zf.write(f_name, arcname=f"ERROR_{f_name}")
                 for f_name in existing_files:
                     os.remove(f_name)
-            log_status("error") 
+            log_status("error")
 
 
-def doublegeomopt(i, config_dict, atoms, calc, Optimizer, executorlib_worker_id=None):
+def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, executorlib_worker_id=None):
 
     rank = executorlib_worker_id
+
+    max_consecutive_errors = config_dict["Main"]["max_consecutive_errors"]
+    if consecutive_errors is not None and consecutive_errors[0] >= max_consecutive_errors > 0:
+        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. Killing worker for restart.")
+        sys.exit(1)
+
     atoms.calc = calc
 
     method_name = config_dict["Main"]["method"]
@@ -205,6 +223,9 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, executorlib_worker_id=
                 status_msg = "unconverged"
             log_status(parent_source_idx, status_msg)
 
+            if consecutive_errors is not None:
+                consecutive_errors[0] = 0
+
             # --- CLEANUP (Success Case) ---
             existing_files = [f for f in temp_files if os.path.exists(f)]
             if existing_files and config_dict['Main']['zip']:
@@ -218,6 +239,8 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, executorlib_worker_id=
             # --- CLEANUP (Error Case) ---
             print(f"Rank {rank} FAILED on structure {i}: {e}")
             print(f"\nTraceback details:\n{traceback.format_exc()}")
+            if consecutive_errors is not None:
+                consecutive_errors[0] += 1
             log_status(parent_source_idx, f"error: {str(e)}")
 
             existing_files = [f for f in temp_files if os.path.exists(f)]
