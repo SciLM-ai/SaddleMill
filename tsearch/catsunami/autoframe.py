@@ -983,7 +983,7 @@ class AutoFrameDesorption(AutoFrame):
                 initial_frames.append(reactant_system)
                 initial_adsorbates.append(adsorbate)
             else:
-                print("not fully connected or desorbed")
+                print("not fully connected or desorbed", flush=True)
             idx_it += 1
 
         # Get proposed final frames

@@ -49,6 +49,7 @@ def main():
             max_workers = max_workers,
             block_allocation = True,
             init_function = init_function,
+            restart_limit = config_dict["Main"]["restart_limit"],
             resource_dict = {
                 "cores": cores,
                 "gpus_per_core": gpus_per_core,
@@ -56,7 +57,6 @@ def main():
                 "num_nodes": 1,
                 "error_log_file": "error",
                 "cwd": os.getcwd(),
-                "restart_limit": config_dict["Main"]["restart_limit"],
             }
         )
         # 'exe' will be the executor instance

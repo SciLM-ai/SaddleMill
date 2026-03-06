@@ -12,6 +12,7 @@ from ase.io import Trajectory
 from ase.mep import DimerControl, MinModeAtoms, MinModeTranslate
 from ase.calculators.singlepoint import SinglePointCalculator
 from tsearch.dimertools.structure_edit import get_attempts
+from tsearch.tools import backup_flux_logs
 
 
 class StopRun(Exception):
@@ -31,7 +32,8 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
 
     max_consecutive_errors = config_dict["Main"]["max_consecutive_errors"]
     if consecutive_errors is not None and consecutive_errors[0] >= max_consecutive_errors > 0:
-        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. Killing worker for restart.")
+        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. Killing worker for restart.", flush=True)
+        backup_flux_logs(rank)
         sys.exit(1)
 
     def log_status(attempt, slctd_indx, status_msg):
@@ -160,8 +162,8 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                         os.remove(f_name)
 
             except Exception as e:
-                print(f"Rank {rank} FAILED on structure {i}, attempt {attempt}: {e}")
-                print(f"\nTraceback details:\n{traceback.format_exc()}")
+                print(f"Rank {rank} FAILED on structure {i}, attempt {attempt}: {e}", flush=True)
+                print(f"\nTraceback details:\n{traceback.format_exc()}", flush=True)
                 existing_files = [f for f in temp_files if os.path.exists(f)]
                 if existing_files and config_dict['Main']['zip']:
                     with zipfile.ZipFile(zip_name, 'a', zipfile.ZIP_DEFLATED) as zf:

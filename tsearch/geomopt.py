@@ -5,7 +5,7 @@ import zipfile
 from ase.io import Trajectory
 from ase.filters import FrechetCellFilter
 from ase.calculators.singlepoint import SinglePointCalculator
-from tsearch.tools import check_reaction, check_adsorbate_reaction
+from tsearch.tools import check_reaction, check_adsorbate_reaction, backup_flux_logs
 
 
 def relax_structure(config_dict, optimizable, logfile, trajfile, Optimizer):
@@ -21,7 +21,8 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
 
     max_consecutive_errors = config_dict["Main"]["max_consecutive_errors"]
     if consecutive_errors is not None and consecutive_errors[0] >= max_consecutive_errors > 0:
-        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. Killing worker for restart.")
+        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. Killing worker for restart.", flush=True)
+        backup_flux_logs(rank)
         sys.exit(1)
 
     atoms.calc = calc
@@ -71,8 +72,8 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
                     os.remove(f_name)
 
         except Exception as e:
-            print(f"Rank {rank} FAILED on structure {i}: {e}")
-            print(f"\nTraceback details:\n{traceback.format_exc()}")
+            print(f"Rank {rank} FAILED on structure {i}: {e}", flush=True)
+            print(f"\nTraceback details:\n{traceback.format_exc()}", flush=True)
             if consecutive_errors is not None:
                 consecutive_errors[0] += 1
             existing_files = [f for f in temp_files if os.path.exists(f)]
@@ -91,7 +92,8 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
 
     max_consecutive_errors = config_dict["Main"]["max_consecutive_errors"]
     if consecutive_errors is not None and consecutive_errors[0] >= max_consecutive_errors > 0:
-        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. Killing worker for restart.")
+        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. Killing worker for restart.", flush=True)
+        backup_flux_logs(rank)
         sys.exit(1)
 
     atoms.calc = calc
@@ -237,8 +239,8 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
 
         except Exception as e:
             # --- CLEANUP (Error Case) ---
-            print(f"Rank {rank} FAILED on structure {i}: {e}")
-            print(f"\nTraceback details:\n{traceback.format_exc()}")
+            print(f"Rank {rank} FAILED on structure {i}: {e}", flush=True)
+            print(f"\nTraceback details:\n{traceback.format_exc()}", flush=True)
             if consecutive_errors is not None:
                 consecutive_errors[0] += 1
             log_status(parent_source_idx, f"error: {str(e)}")

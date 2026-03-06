@@ -12,6 +12,7 @@ from ase.calculators.singlepoint import SinglePointCalculator
 from ase.io import Trajectory
 from ase.mep.neb import NEB, NEBTools, NEBState
 from tsearch.catsunami.ocpneb import OCPNEB
+from tsearch.tools import backup_flux_logs
 
 
 def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, executorlib_worker_id=None):
@@ -20,7 +21,8 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
 
     max_consecutive_errors = config_dict["Main"]["max_consecutive_errors"]
     if consecutive_errors is not None and consecutive_errors[0] >= max_consecutive_errors > 0:
-        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. Killing worker for restart.")
+        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. Killing worker for restart.", flush=True)
+        backup_flux_logs(rank)
         sys.exit(1)
 
     relax_endpoints = config_dict["ourNEB"]["relax_endpoints"]
@@ -69,7 +71,7 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
             product.calc = calc
 
         if relax_endpoints:
-            if not interpolate_method: print("Are you sure you want to relax end points while keeping the intermediate images from your traj?")
+            if not interpolate_method: print("Are you sure you want to relax end points while keeping the intermediate images from your traj?", flush=True)
             if config_dict["ourNEB"]["endpoint_relax_Optimizer"] is None:
                 endpoint_relax_optimizer_name = config_dict["Main"]["Optimizer"]
             else:
@@ -230,8 +232,8 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
                     os.remove(f_name)
 
     except Exception as e:
-        print(f"Rank {rank} FAILED on structure {i}: {e}")
-        print(f"\nTraceback details:\n{traceback.format_exc()}")
+        print(f"Rank {rank} FAILED on structure {i}: {e}", flush=True)
+        print(f"\nTraceback details:\n{traceback.format_exc()}", flush=True)
         if consecutive_errors is not None:
             consecutive_errors[0] += 1
         if config_dict["Main"]["Calculator"] == "VaspInteractive":

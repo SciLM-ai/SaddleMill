@@ -1,6 +1,23 @@
 import numpy as np
-import json, os
+import json, os, shutil
 from ase.neighborlist import neighbor_list, natural_cutoffs
+
+
+#==============================================================================
+### FLUX LOG BACKUP
+
+def backup_flux_logs(worker_id):
+    """Append current flux log files into backup files before worker restart.
+
+    Flux overwrites flux_{id}.out/.err on each new job submission, so we
+    append their contents to persistent backup files before sys.exit(1).
+    """
+    for ext in (".out", ".err"):
+        src = f"flux_{worker_id}{ext}"
+        dst = f"flux_{worker_id}{ext}.bak"
+        if os.path.exists(src):
+            with open(src, 'r') as f_in, open(dst, 'a') as f_out:
+                f_out.write(f_in.read())
 
 
 #==============================================================================
@@ -72,13 +89,17 @@ def clean_up_files(config_dict):
     if method_name == "NEB" and config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"):
         patterns["NEB"].append("VASP_*_*/")
 
+    # Flux log files and their backups (common to all methods)
+    patterns.setdefault(method_name, [])
+    patterns[method_name].extend(["flux_*.out", "flux_*.err", "flux_*.out.bak", "flux_*.err.bak"])
+
     for pat in patterns.get(method_name, []):
         for f in _glob.glob(pat):
             if os.path.isdir(f):
                 shutil.rmtree(f)
             else:
                 os.remove(f)
-    
+
 
 #==============================================================================
 ### BOND-BREAKING/FORMING DETECTION
