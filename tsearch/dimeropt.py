@@ -19,6 +19,29 @@ class StopRun(Exception):
     pass
 
 
+def _continuation_iter(continuation_atoms_list):
+    """Convert continuation Atoms into (attempt, (atoms, disp_dict, selected_index)) tuples.
+
+    Each Atoms carries its original metadata in orig_info. We propagate
+    eigenmode and reaction_type into atoms.info so the existing loop body
+    picks them up. The displacement is negligible (structure is already
+    near the saddle point).
+    """
+    for atoms in continuation_atoms_list:
+        orig = atoms.info.get("orig_info", atoms.info)
+        attempt = orig.get("attempt_id", 0)
+        slctd_indx = orig.get("selected_index", -1)
+
+        atoms_new = atoms.copy()
+        atoms_new.info = {}
+        if "eigenmode" in orig:
+            atoms_new.info["eigenmode"] = np.array(orig["eigenmode"])
+        atoms_new.info["reaction_type"] = orig.get("reaction_type", "unknown")
+
+        disp_dict = {"displacement_vector": np.random.randn(len(atoms_new), 3) * 1e-10, "method": "vector"}
+        yield attempt, (atoms_new, disp_dict, slctd_indx)
+
+
 def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executorlib_worker_id=None, **kwargs):
 
     rank = executorlib_worker_id
@@ -49,7 +72,12 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
         slctd_indx = -1
         temp_files = []
 
-        for attempt, (atoms, displacement_dict, slctd_indx) in enumerate(zip(*get_attempts(atoms_orig, config_dict))):
+        if isinstance(atoms_orig, list):
+            attempts_iter = _continuation_iter(atoms_orig)
+        else:
+            attempts_iter = enumerate(zip(*get_attempts(atoms_orig, config_dict)))
+
+        for attempt, (atoms, displacement_dict, slctd_indx) in attempts_iter:
 
             temp_log = f'dimer_control_{i}_{attempt}_{slctd_indx}.log'
             temp_opt_log = f'dimer_opt_{i}_{attempt}_{slctd_indx}.log'
@@ -70,7 +98,14 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                     **config_dict["DimerControl"],
                 )
 
-                d_atoms = MinModeAtoms(atoms, d_control)
+                # Use existing eigenmode from atoms.info if available (e.g. from
+                # a previous dimer/NEB run via initial_guess), otherwise let
+                # ASE derive one from the displacement.
+                eigenmode_kwarg = {}
+                if 'eigenmode' in atoms.info:
+                    eigenmode_kwarg['eigenmodes'] = [np.array(atoms.info['eigenmode'])]
+
+                d_atoms = MinModeAtoms(atoms, d_control, **eigenmode_kwarg)
                 d_atoms.displace(**displacement_dict)
 
                 dim_rlx = MinModeTranslate(

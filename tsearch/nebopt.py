@@ -29,6 +29,12 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
     interpolate_method = config_dict["ourNEB"]["interpolate_method"]  # this is idpp implementation from Meta OCP, other choises are "ase_idpp" and "ase_linear" or False if you already have a frame set
     perform_aseidpp = False
     num_frames = config_dict["ourNEB"]["num_frames"]
+
+    # Continuation: band extracted from a previous run — skip interpolation and endpoint relaxation
+    if (isinstance(images, list) and len(images) > 0 and
+            images[0].info.get("orig_info", images[0].info).get("_continuation", False)):
+        relax_endpoints = False
+        interpolate_method = False
     zip_name = f"{config_dict['Main']['method']}_debug_zips/structure_rank_{rank}_data.zip"
     status_file = f"{config_dict['Main']['method']}_status_csvs/status_rank_{rank}.csv"
     my_output_file = f"{config_dict['Main']['method']}_trajes/collected_ts_rank_{rank}.traj"

@@ -203,3 +203,48 @@ done
 # --- END: FIX LIBRARY PATHS ---
 
 ```
+
+### Running tsearch
+
+Create a `config.ini` in your working directory (see `CLAUDE.md` for full reference), place your input `.traj` files in `dir_path`, then launch:
+
+```bash
+# Distributed (multi-node, multi-GPU)
+srun -N $SLURM_NNODES -n $SLURM_NNODES --gpus-per-node=4 flux start python -u -m tsearch
+
+# Serial (single GPU, useful for debugging)
+# Set executorlib = False in config.ini, then:
+python -u -m tsearch
+```
+
+### Resume and Continuation
+
+tsearch automatically handles resume if a job times out or is interrupted:
+
+- **Resume unfinished jobs**: Just resubmit with the same `config.ini`. By default (`run_jobs = not_started`), only jobs that never ran are picked up. Already-completed jobs are skipped.
+
+- **Redo specific categories**: Set `run_jobs` to target specific job outcomes:
+  ```ini
+  run_jobs = not_converged    # Redo unconverged jobs
+  run_jobs = converged        # Redo converged jobs (e.g., refine with VASP)
+  run_jobs = error            # Retry errored jobs
+  run_jobs = all              # Redo everything
+  ```
+
+- **Continue from previous result** (`continue_from_result = True`, default): When re-running previously completed jobs, tsearch extracts the last result and starts from there instead of from scratch. For NEB, the full band is extracted from debug files. For Dimer, each individual attempt is continued with its original eigenmode and reaction type. For errored jobs (no output), it falls back to the original input automatically. Set `continue_from_result = False` to force a fresh start.
+
+- **CSV archiving**: When re-running jobs that have existing results, old status CSVs are archived as `{method}_status_csvs/previous_{N}.zip` and entries for those job IDs are removed from the active CSVs before the new run begins.
+
+- **Fresh start**: Delete `traj_files_ordered.json` and the output directories to start completely from scratch.
+
+### Dimer: `initial_guess` Reaction Type
+
+The `initial_guess` reaction type is for running the dimer method on a **pre-prepared TS guess** from an external source (another code, a database, or a different tsearch method like NEB). It starts the dimer from the input geometry as-is with no displacement. If the input structure has an eigenmode in `atoms.info['eigenmode']`, it is used to seed the dimer instead of a random guess.
+
+```ini
+[ourDimer]
+dataset_type = bulk          # or oc
+reaction_types = initial_guess
+```
+
+This is different from `continue_from_result`, which is an automatic mechanism for continuing a previous tsearch run. Use `initial_guess` when bringing a TS from outside tsearch; `continue_from_result` handles the "pick up where I left off" case internally.

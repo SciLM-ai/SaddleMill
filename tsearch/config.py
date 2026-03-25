@@ -1,5 +1,5 @@
 import configparser
-import os, glob, copy, pathlib, zipfile
+import os, re, glob, copy, pathlib, zipfile
 import pandas as pd
 from ase.io import Trajectory
 
@@ -20,6 +20,7 @@ class ConfigManager:
             "jobs_per_node": 1,  # this only used if device = 'cpu', otherwise jobs_per_gpu is used
             "jobs_per_gpu": 1,
             "run_jobs": "not_started",
+            "continue_from_result": True,
             "zip": True,
             "max_consecutive_errors": 5,
             "restart_limit": 3,
@@ -387,6 +388,134 @@ def archive_and_clean_csvs(config_dict, job_ids):
             os.remove(f)
         else:
             filtered.to_csv(f, header=False, index=False)
+
+
+def _get_debug_filename_patterns(method_name):
+    """Return compiled regex patterns that capture job_id from debug filenames."""
+    if method_name == "NEB":
+        return [
+            re.compile(r'^(?:ERROR_)?neb_(\d+)\.'),
+            re.compile(r'^(?:ERROR_)?(?:reactant|product)_relaxation_(\d+)\.'),
+            re.compile(r'^(?:ERROR_)?diffusion_barrier_(\d+)\.'),
+            re.compile(r'^VASP_(\d+)_'),
+        ]
+    elif method_name == "Dimer":
+        return [re.compile(r'^(?:ERROR_)?dimer_(?:control_|opt_)?(\d+)_')]
+    elif method_name in ("Minimization", "DoubleMinimization"):
+        return [re.compile(r'^(?:ERROR_)?optimization_r\d+_(\d+)')]
+    return []
+
+
+def _extract_job_id(filename, patterns):
+    """Extract integer job_id from a debug filename. Returns int or None."""
+    for pat in patterns:
+        m = pat.match(filename)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def archive_and_clean_outputs(config_dict, job_ids):
+    """Archive output trajectories and debug zips, remove entries for re-run jobs.
+
+    Mirrors archive_and_clean_csvs: archive all current files into previous_{N}.zip,
+    then filter out entries belonging to the re-run job_ids. Only triggers if
+    stale entries actually exist (skips for pure not_started jobs).
+    """
+    if not job_ids:
+        return
+
+    method_name = config_dict["Main"]["method"]
+    job_ids_set = set(job_ids)
+
+    # ---- Output Trajectories ----
+    traj_dir = f"{method_name}_trajes"
+    traj_files = glob.glob(os.path.join(traj_dir, "*.traj"))
+
+    if traj_files:
+        has_stale = False
+        for traj_path in traj_files:
+            try:
+                with Trajectory(traj_path, 'r') as traj:
+                    for idx in range(len(traj)):
+                        if traj[idx].info.get('src_index') in job_ids_set:
+                            has_stale = True
+                            break
+            except Exception:
+                continue
+            if has_stale:
+                break
+
+        if has_stale:
+            # Archive
+            n = 0
+            while os.path.exists(os.path.join(traj_dir, f"previous_{n}.zip")):
+                n += 1
+            with zipfile.ZipFile(os.path.join(traj_dir, f"previous_{n}.zip"), 'w', zipfile.ZIP_DEFLATED) as zf:
+                for f in traj_files:
+                    zf.write(f, os.path.basename(f))
+
+            # Filter
+            for traj_path in traj_files:
+                try:
+                    with Trajectory(traj_path, 'r') as traj:
+                        all_frames = [traj[idx] for idx in range(len(traj))]
+                except Exception:
+                    continue
+                kept = [img for img in all_frames if img.info.get('src_index') not in job_ids_set]
+                os.remove(traj_path)
+                if kept:
+                    with Trajectory(traj_path, 'w') as writer:
+                        for img in kept:
+                            writer.write(img)
+
+    # ---- Debug Zips ----
+    zip_dir = f"{method_name}_debug_zips"
+    zip_files = [f for f in glob.glob(os.path.join(zip_dir, "*.zip"))
+                 if not os.path.basename(f).startswith("previous_")]
+
+    if zip_files:
+        patterns = _get_debug_filename_patterns(method_name)
+        has_stale = False
+        for zip_path in zip_files:
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    for name in zf.namelist():
+                        if _extract_job_id(name, patterns) in job_ids_set:
+                            has_stale = True
+                            break
+            except zipfile.BadZipFile:
+                continue
+            if has_stale:
+                break
+
+        if has_stale:
+            # Archive
+            n = 0
+            while os.path.exists(os.path.join(zip_dir, f"previous_{n}.zip")):
+                n += 1
+            with zipfile.ZipFile(os.path.join(zip_dir, f"previous_{n}.zip"), 'w', zipfile.ZIP_DEFLATED) as zf:
+                for f in zip_files:
+                    zf.write(f, os.path.basename(f))
+
+            # Filter
+            for zip_path in zip_files:
+                try:
+                    with zipfile.ZipFile(zip_path, 'r') as zf_old:
+                        all_entries = zf_old.infolist()
+                        kept = [info for info in all_entries
+                                if _extract_job_id(info.filename, patterns) not in job_ids_set]
+
+                        if not kept:
+                            os.remove(zip_path)
+                        elif len(kept) < len(all_entries):
+                            tmp_path = zip_path + ".tmp"
+                            with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zf_new:
+                                for info in kept:
+                                    zf_new.writestr(info, zf_old.read(info.filename))
+                            os.replace(tmp_path, zip_path)
+                except zipfile.BadZipFile:
+                    continue
 
 
 def get_flux_resources(config_dict):

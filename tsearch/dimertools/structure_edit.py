@@ -652,9 +652,19 @@ def get_initial_guess_attempts(atoms):
     Used when the input geometry is already a good TS guess and only dimer
     refinement (rotation + translation) is needed — no random perturbation.
     Always produces exactly 1 attempt.
+
+    If the input atoms carry an eigenmode (in atoms.info['eigenmode'] or
+    atoms.info['orig_info']['eigenmode']), it is preserved in the output so
+    that dimeropt can seed the dimer with it instead of a random guess.
     """
     atoms_new = atoms.copy()
     atoms_new.info['reaction_type'] = 'initial_guess'
+
+    # Propagate eigenmode from orig_info if present
+    orig = atoms.info.get('orig_info', atoms.info)
+    if 'eigenmode' in orig:
+        atoms_new.info['eigenmode'] = np.array(orig['eigenmode'])
+
     disp_vector = np.random.randn(len(atoms_new), 3) * 1e-10
     return [atoms_new], [{"displacement_vector": disp_vector, "method": "vector"}], [-1]
 

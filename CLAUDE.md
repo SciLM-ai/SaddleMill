@@ -50,10 +50,11 @@ catsunami/ocpneb.py  (OCPNEB: batched NEB with swDNEB switching)
 - Resume support: `get_remaining_trajes()` skips completed jobs
 
 ### `nebopt.py` - NEB Workflow
-1. **Endpoint relaxation** (optional): Relaxes reactant/product with configurable optimizer (e.g., LBFGS). For VaspInteractive, calculators are finalized after relaxation and endpoints are frozen with `SinglePointCalculator`.
-2. **Interpolation**: `ocp_idpp` (Meta's PBC-aware), `ase_idpp`, `ase_linear` (auto-falls back to IDPP on atom overlap), or `False` (use provided frames)
-3. **NEB optimization**: Uses `OCPNEB` class with MDMin optimizer. Supports climbing image. For VASP/VaspInteractive, each image gets its own calculator instance with separate working directories (`VASP_{job_id}_{image_idx}/`), separate `command`/`ncore` settings for endpoints vs intermediates, and WAVECAR/CHG/CHGCAR cleanup after completion.
-4. **Output**: Extracts critical image (TS candidate) with tangent vector as eigenmode, barrier height, and reaction energetics. Generates band plot PNG.
+1. **Continuation check**: If images carry `_continuation` flag in `orig_info` (set by `continue_from_result`), locally overrides `relax_endpoints = False` and `interpolate_method = False` — skips steps 2-3 below and goes straight to NEB optimization from the extracted band.
+2. **Endpoint relaxation** (optional): Relaxes reactant/product with configurable optimizer (e.g., LBFGS). For VaspInteractive, calculators are finalized after relaxation and endpoints are frozen with `SinglePointCalculator`.
+3. **Interpolation**: `ocp_idpp` (Meta's PBC-aware), `ase_idpp`, `ase_linear` (auto-falls back to IDPP on atom overlap), or `False` (use provided frames)
+4. **NEB optimization**: Uses `OCPNEB` class with MDMin optimizer. Supports climbing image. For VASP/VaspInteractive, each image gets its own calculator instance with separate working directories (`VASP_{job_id}_{image_idx}/`), separate `command`/`ncore` settings for endpoints vs intermediates, and WAVECAR/CHG/CHGCAR cleanup after completion.
+5. **Output**: Extracts critical image (TS candidate) with tangent vector as eigenmode, barrier height, and reaction energetics. Generates band plot PNG.
 
 ### `catsunami/ocpneb.py` - Core NEB Engine
 - **`OCPNEB`** (extends BaseNEB): Two modes controlled by `vasp` flag:
@@ -74,6 +75,7 @@ catsunami/ocpneb.py  (OCPNEB: batched NEB with swDNEB switching)
 - Writes `reaction_type` to `atoms.info` for each attempt
 - **Per-attempt error handling**: Each dimer attempt has its own try/except, so one failing attempt does not abort remaining attempts for the same structure
 - **Consecutive error tracking**: Tracks structure-level errors via `consecutive_errors` counter (passed from `init_function`). If all attempts for a structure fail, counter increments; any successful attempt resets it to 0. When counter reaches `max_consecutive_errors`, worker calls `sys.exit(1)` to trigger executorlib restart (see Worker Health section)
+- **Continuation mode**: When `atoms_orig` is a list (from `continue_from_result`), `dimeropt` bypasses `get_attempts()` and uses `_continuation_iter()` instead. This generator extracts each attempt's eigenmode, reaction_type, and selected_index from `orig_info`, builds a negligible displacement, and yields the same `(attempt, (atoms, disp_dict, selected_index))` tuples as normal mode. The existing loop body handles both modes transparently — eigenmode is passed to `MinModeAtoms` via `eigenmodes=` kwarg when present in `atoms.info`.
 
 ### `dimertools/structure_edit.py` - Reaction Types for Dimer
 Dimer mode supports 7 reaction types, configured via `reaction_types` (space-separated list):
@@ -86,7 +88,7 @@ Dimer mode supports 7 reaction types, configured via `reaction_types` (space-sep
 | `kickout_reuse` | `get_kickout_reuse_attempts()` | Existing atom placed at interstitial, kicks nearest lattice atom into another interstitial | 2 (vector) |
 | `kickout_insert` | `get_kickout_insert_attempts()` | New similar-sized atom inserted at interstitial, kicks nearest lattice atom | 2 (vector) |
 | `ring` | `get_ring_attempts()` | Ring of 2+ atoms rotate cooperatively; size randomly sampled from `ring_sizes` config. Use `ring_sizes = 2` for pairwise exchange. | N (vector) |
-| `initial_guess` | `get_initial_guess_attempts()` | No displacement — dimer starts from input geometry as-is. For pre-prepared TS guesses. Exclusive: ignores other types with warning. Always 1 attempt. Works with both `bulk` and `oc` dataset types. | 0 (none) |
+| `initial_guess` | `get_initial_guess_attempts()` | No displacement — dimer starts from input geometry as-is. For pre-prepared TS guesses. Exclusive: ignores other types with warning. Always 1 attempt. Works with both `bulk` and `oc` dataset types. If the input structure has an eigenmode (in `atoms.info['eigenmode']` or `atoms.info['orig_info']['eigenmode']`), it is passed to `MinModeAtoms` to seed the dimer instead of a random guess. | 0 (none) |
 
 **Key infrastructure:**
 - `find_interstitial_sites(atoms)`: Voronoi tessellation on 3x3x3 periodic images → filter by min distance from atoms → cluster within 0.5 Å. Uses `scipy.spatial.Voronoi` and `scipy.cluster.hierarchy`.
@@ -107,6 +109,14 @@ Dimer mode supports 7 reaction types, configured via `reaction_types` (space-sep
 ### `tools.py` - Utilities
 - `load_and_sanitize(traj, i, j)`: Loads atoms from trajectory and stashes original `.info` into `atoms.info = {"orig_info": <original_info>}`. This prevents per-atom array data (e.g. `forces`, `stress`) from causing size mismatches when atoms are later added/removed (e.g. vacancy in Dimer). Called in `__main__.py` for all methods uniformly.
 - `clean_up_files(config_dict)`: Removes leftover temp files on resume. Method-aware: cleans NEB files (`neb_*.log`, `neb_*.traj`, `reactant_relaxation_*`, `product_relaxation_*`, `diffusion_barrier_*.png`), Dimer files (`dimer_control_*.log`, `dimer_opt_*.log`, `dimer_*.traj`), or Minimization files (`optimization_*.log`, `optimization_*.traj`). For VASP NEB, also removes `VASP_*_*/` per-image directories.
+- **Continue-from-result extraction** (used by `__main__.py` when `continue_from_result = True`):
+  - `extract_previous_results(job_ids, config_dict)`: Dispatcher that calls method-specific extractors. Returns `{job_id: images}` dict. Jobs with no extractable result are omitted (fall back to original input).
+  - `_extract_neb_band(job_id, num_frames, debug_zip_index)`: Extracts the final NEB band (last `num_frames` frames) from debug traj — tries loose file first, then searches debug zips.
+  - `_extract_dimer_attempts(job_id, output_traj_index)`: Extracts ALL successful attempt results for a job_id from output trajectories (one Atoms per attempt that produced output).
+  - `_extract_minimization_structure(job_id, output_traj_index)`: Extracts the relaxed structure from output trajectory.
+  - `_build_debug_zip_index(method_name)`: Scans all debug zips once, builds `{filename: zip_path}` map.
+  - `_build_output_traj_index(method_name)`: Scans output trajectories, builds `{src_index: [(traj_path, frame_idx, info), ...]}` map.
+  - `_sanitize_with_continuation(atoms)`: Wraps `.info` into `orig_info` (like `load_and_sanitize`) and sets `_continuation = True` flag so method functions can detect continuation images.
 - Bond detection via ASE neighbor_list with natural cutoffs
 - `check_reaction()` / `check_adsorbate_reaction()`: Compare connectivity between structures
 
@@ -138,6 +148,7 @@ steps = 6000                # Maximum optimization steps
 jobs_per_gpu = 1            # Number of concurrent jobs per GPU
 Calculator = FAIRChemCalculator  # FAIRChemCalculator | Vasp | VaspInteractive
 run_jobs = not_started       # Which job categories to process (see below)
+continue_from_result = True # On resume, start from previous result instead of original input (see below)
 zip = True                  # Compress debug files
 max_consecutive_errors = 5  # Kill worker after N consecutive structures all-error (0 = disabled)
 restart_limit = 3           # executorlib: max worker restarts before permanent death (0 = no restarts)
@@ -233,9 +244,50 @@ run_jobs = error                      # Retry only errors
 run_jobs = all                        # Redo everything
 ```
 
-**CSV archiving**: When redoing jobs that have existing CSV entries, old CSVs are archived as `{method}_status_csvs/previous_{N}.zip` (incrementing N) and entries for those job IDs are removed from the active CSVs. Jobs with no prior entries (e.g., `not_started`) don't trigger archiving.
+**Archiving on resume**: When redoing jobs that have existing results, all output files are archived and cleaned:
+- **CSVs**: Archived as `{method}_status_csvs/previous_{N}.zip`, entries for re-run job IDs removed from active CSVs.
+- **Output trajectories**: Archived as `{method}_trajes/previous_{N}.zip`, frames for re-run job IDs removed (filtered by `src_index`).
+- **Debug zips**: Archived as `{method}_debug_zips/previous_{N}.zip`, entries for re-run job IDs removed (filtered by job_id in filename via regex).
+
+Jobs with no prior entries (e.g., `not_started`) don't trigger archiving. The `previous_*.zip` archives in debug_zips are excluded from extraction scans (`_build_debug_zip_index` skips them).
 
 **Fresh vs resume**: No explicit toggle — if `traj_files_ordered.json` doesn't exist, it's a fresh start; if it exists, it's a resume. To force a fresh start, delete the output directories and `traj_files_ordered.json`.
+
+### `continue_from_result` — Continue from Previous Result
+
+When `continue_from_result = True` (default) and re-running previously completed jobs (any `run_jobs` category except `not_started`), the system extracts previous results and uses them as starting points instead of the original input trajectories.
+
+Continuation is handled **per-job** inside each method function — no global config mutation. This means fresh jobs (`not_started`) and continuation jobs can coexist in the same batch without interference.
+
+**How it works per method:**
+
+| Method | What is extracted | What happens |
+|---|---|---|
+| NEB | Full band from debug traj (`neb_{job_id}.traj` in debug zips) | `nebopt` detects `_continuation` flag, locally skips endpoint relaxation and interpolation, continues NEB optimization from the extracted band |
+| Dimer | All successful attempt results from output traj (one per attempt) | `dimeropt` detects list input, bypasses `get_attempts()`, continues each attempt from its previous structure with its original eigenmode and reaction_type |
+| Minimization | Relaxed structure from output traj | Optimizer continues from previous positions |
+| DoubleMinimization | Not supported (raises error) | — |
+
+**Dimer per-attempt continuation**: Each attempt that produced output (converged or not_converged) is continued individually. The original `reaction_type` (e.g., `"vacancy"`) is preserved in the output — not replaced with `"initial_guess"`. The previous eigenmode is passed to `MinModeAtoms` to seed the dimer. Errored attempts (which have no output frame) are skipped. The configured `reaction_types` in `[ourDimer]` is ignored for continuation jobs.
+
+**Fallback**: If previous results cannot be extracted (missing debug files, all attempts errored), the job silently falls back to the original input and runs from scratch. In `__main__.py`, this happens naturally: jobs missing from `previous_results` dict use `load_and_sanitize()` to load the original input.
+
+**`initial_guess` vs `continue_from_result`**: These are separate features. `initial_guess` is a Dimer reaction type for fresh runs with **external** TS guesses (from another code, a database, or a different tsearch method like NEB→Dimer). It requires the user to set `reaction_types = initial_guess` and provide input `.traj` files. `continue_from_result` is an automatic internal mechanism that extracts results from a **previous tsearch run** and feeds them back. It bypasses `get_attempts()` entirely and does not use `initial_guess`. Use `initial_guess` when you bring a TS from outside tsearch; use `continue_from_result` when you want tsearch to pick up where it left off.
+
+**Examples:**
+```ini
+# Continue unconverged NEB jobs with more steps
+run_jobs = not_converged
+steps = 10000
+
+# Refine converged dimer results with a better calculator
+run_jobs = converged
+Calculator = VaspInteractive
+
+# Re-run from scratch (ignore previous results)
+run_jobs = not_converged
+continue_from_result = False
+```
 
 ## Output Structure
 

@@ -154,6 +154,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
             min1.info['type'] = 'minimum_1'
             min1.info['parent_ts_index'] = parent_source_idx
             min1.info['converged'] = conv1
+            min1.info['src_index'] = i
 
             # --- MINIMIZATION 2 (Backward) ---
             min2 = ts_atoms.copy()
@@ -173,6 +174,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
             min2.info['type'] = 'minimum_2'
             min2.info['parent_ts_index'] = parent_source_idx
             min2.info['converged'] = conv2
+            min2.info['src_index'] = i
 
             # --- CHECK REACTION ---
             neighbor_fudge = 1.25
@@ -209,7 +211,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
             ts_atoms.info['is_ads_reaction'] = is_ads_reaction
             ts_atoms.info['n_ads_formed_bonds'] = ads_n_formed
             ts_atoms.info['n_ads_broken_bonds'] = ads_n_broken
-
+            ts_atoms.info['src_index'] = i
 
             # --- WRITE TRIPLET (Min1 -> TS -> Min2) ---
             writer.write(min1)
