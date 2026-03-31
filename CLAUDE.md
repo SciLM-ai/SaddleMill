@@ -71,8 +71,9 @@ catsunami/ocpneb.py  (OCPNEB: batched NEB with swDNEB switching)
 
 ### `dimeropt.py` - Dimer Method
 - Generates displacement candidates via `dimertools/structure_edit.py`
-- Supports `bulk` (multiple reaction types, see below) and `oc` (adsorbate-targeted) modes
+- Supports `bulk` (multiple reaction types, see below) and `oc` (adsorbate-targeted, see below) modes. Both use `reaction_types` + `num_attempts_per_type` config.
 - Convergence checks every 5 steps: participation ratio (delocalization) and desorption detection
+- **Desorption flagging**: When the desorption check triggers a `StopRun`, the `reaction_type` in `atoms.info` is overridden to `'desorption'` (regardless of the initialization type). This allows distinguishing desorption events from other stop reasons (e.g., delocalization) in the output trajectories.
 - Extension check if initial convergence fails
 - Writes `reaction_type` to `atoms.info` for each attempt
 - **Per-attempt error handling**: Each dimer attempt has its own try/except, so one failing attempt does not abort remaining attempts for the same structure
@@ -80,7 +81,9 @@ catsunami/ocpneb.py  (OCPNEB: batched NEB with swDNEB switching)
 - **Continuation mode**: When `atoms_orig` is a list (from `continue_from_result`), `dimeropt` bypasses `get_attempts()` and uses `_continuation_iter()` instead. This generator extracts each attempt's eigenmode, reaction_type, and selected_index from `orig_info`, builds a negligible displacement, and yields the same `(attempt, (atoms, disp_dict, selected_index))` tuples as normal mode. The existing loop body handles both modes transparently — eigenmode is passed to `MinModeAtoms` via `eigenmodes=` kwarg when present in `atoms.info`.
 
 ### `dimertools/structure_edit.py` - Reaction Types for Dimer
-Dimer mode supports 7 reaction types, configured via `reaction_types` (space-separated list):
+Dimer mode supports named reaction types, configured via `reaction_types` (space-separated list). Bulk and OC dataset types have separate type sets dispatched via `_BULK_REACTION_TYPE_DISPATCH` and `_OC_REACTION_TYPE_DISPATCH` respectively.
+
+**Bulk reaction types** (`dataset_type = bulk`):
 
 | Type | Function | Description | Atoms displaced |
 |------|----------|-------------|-----------------|
@@ -92,17 +95,36 @@ Dimer mode supports 7 reaction types, configured via `reaction_types` (space-sep
 | `ring` | `get_ring_attempts()` | Ring of 2+ atoms rotate cooperatively; size randomly sampled from `ring_sizes` config. Use `ring_sizes = 2` for pairwise exchange. | N (vector) |
 | `initial_guess` | `get_initial_guess_attempts()` | No displacement — dimer starts from input geometry as-is (supercell expansion is skipped). For pre-prepared TS guesses. Exclusive: ignores other types with warning. Always 1 attempt. Works with both `bulk` and `oc` dataset types. If the input structure has an eigenmode (in `atoms.info['eigenmode']` or `atoms.info['orig_info']['eigenmode']`), it is passed to `MinModeAtoms` to seed the dimer instead of a random guess. | 0 (none) |
 
+**OC reaction types** (`dataset_type = oc`):
+
+Adsorbate atoms are identified by tag=2 (fallback tag=1). Substrate atoms (tag=0) are always fixed via `FixAtoms`. Both bulk and OC use `reaction_types` + `num_attempts_per_type` for configuration.
+
+| Type | Function | Description | Displacement mechanism |
+|------|----------|-------------|----------------------|
+| `adsorbate_atom` | `get_adsorbate_atom_attempts()` | Tight Gaussian on one adsorbate atom — only that atom moves | `displacement_center` + `gauss_std=0.2, number_of_atoms=1` |
+| `adsorbate_atom_neighbors` | `get_adsorbate_atom_neighbors_attempts()` | Broad Gaussian on one adsorbate atom — nearby atoms also displaced | `displacement_center` (default DimerControl std) |
+| `adsorbate` | `get_adsorbate_attempts()` | Random noise on all adsorbate atoms (internal rearrangement, isomerization) | Adsorbate-only mask |
+| `diffusion` | `get_diffusion_attempts()` | Uniform translation of all adsorbate atoms in a random 3D direction (molecular migration, desorption) | `displacement_vector` (same direction for all adsorbate atoms, magnitude ~0.1 A) |
+| `rotation` | `get_rotation_attempts()` | Rigid-body rotation of adsorbate around center of mass (molecular reorientation). Skips with warning for single-atom adsorbates. | `displacement_vector` (tangential, random axis, ~0.05 rad) |
+| `adsorbate_surface` | `get_adsorbate_surface_attempts()` | Random noise on adsorbate + neighboring substrate atoms (interface reactions, subsurface penetration) | Adsorbate+neighbors mask (natural_cutoffs * 1.25) |
+| `surface` | `get_surface_attempts()` | Broad Gaussian on one surface atom (tag=1) — surface reconstruction | `displacement_center` (default DimerControl std) |
+| `initial_guess` | `get_initial_guess_attempts()` | Same as bulk `initial_guess` (see above) | 0 (none) |
+
+**OC helper functions:**
+- `_get_oc_adsorbate_indices(atoms)`: Returns indices of adsorbate atoms (tag=2, fallback tag=1).
+- `_get_oc_neighbor_mask(atoms, adsorbate_indices)`: Builds neighbor mask using natural_cutoffs * 1.25.
+- `_sample_adsorbate_atoms(adsorbate_indices, num_needed)`: Samples N atom indices with cycling if fewer available.
+
 **Key infrastructure:**
 - `find_interstitial_sites(atoms)`: Voronoi tessellation on 3x3x3 periodic images → filter by min distance from atoms → cluster within 0.5 Å. Uses `scipy.spatial.Voronoi` and `scipy.cluster.hierarchy`.
 - `_mic_vector()` / `_nearest_site()`: Minimum image convention helpers for periodic distance calculations.
 - `_find_ring(neighbors_dict, seed, ring_size)`: Finds closed rings of connected atoms in the neighbor graph via constrained random walk. Ring size=2 handles pairwise exchange, ring size>=3 handles cooperative ring rotations.
 - Element sampling: `hop_insert` uses small atoms weighted by 1/covalent_radius (H heavily favored). `kickout_insert` uses Gaussian weight centered on host avg covalent radius (σ=0.2 Å) from a pool of 30 common metals/semiconductors.
 - `turn_into_supercell(atoms, min_length=7.0)`: Preserves `.info` across `make_supercell()` (ASE's `make_supercell` drops `.info`). Enforces minimum cell dimension of 7 Å in each periodic direction to avoid self-interaction artifacts through PBC (important for fairchem's radius graph which uses a 5 Å cutoff). Called centrally in `get_attempts()` for all reaction types except `initial_guess` (controlled by `supercell` config option, default `True`).
-- Dispatch: `_REACTION_TYPE_DISPATCH` dict maps type names to functions. `get_attempts()` iterates over configured types. `initial_guess` is handled early (before bulk/oc branch) since it works with both dataset types.
+- Dispatch: `_BULK_REACTION_TYPE_DISPATCH` and `_OC_REACTION_TYPE_DISPATCH` dicts map type names to functions. `get_attempts()` selects the appropriate dict based on `dataset_type`. `initial_guess` is handled early (before bulk/oc branch) since it works with both dataset types.
 - `_safe_normalize(vec)`: Normalizes a vector; returns a random unit vector if norm is near zero (prevents division-by-zero in ring displacement calculations).
 - `_build_neighbor_dict(atoms)`: Builds neighbor graph; skips self-interactions (`i == j`) which can occur in small periodic cells.
 - Defensive guards throughout: zero-weight fallback in `_sample_kickout_insert_element`, empty `ring_sizes` early return, missing adsorbate atoms early return in OC mode.
-- Backward compatible: default `reaction_types = vacancy` reproduces original behavior exactly.
 
 ### `geomopt.py` - Geometry Optimization
 - `geomopt()`: Standard relaxation with optional cell relaxation (FrechetCellFilter)
@@ -212,10 +234,10 @@ allow_shared_calculator = True
 
 [ourDimer]
 dataset_type = oc            # oc | bulk
-num_attempts = 3             # Used for oc mode attempt count
-reaction_types = vacancy     # Space-separated: vacancy hop_reuse hop_insert kickout_reuse kickout_insert ring initial_guess
-num_attempts_per_type = 1    # Attempts per reaction type (bulk mode); total = len(types) * num_per_type
-ring_sizes = 3 4             # Ring sizes to sample from for 'ring' reaction type
+reaction_types = vacancy     # Bulk: vacancy hop_reuse hop_insert kickout_reuse kickout_insert ring initial_guess
+                             # OC: adsorbate_atom adsorbate_atom_neighbors adsorbate diffusion rotation adsorbate_surface surface initial_guess
+num_attempts_per_type = 1    # Attempts per reaction type; total = len(types) * num_per_type
+ring_sizes = 3 4             # Ring sizes to sample from for 'ring' reaction type (bulk only)
 supercell = True             # Apply supercell expansion (min 7 Å) before generating attempts
 delocalization_threshold = 0.8
 extension_check_fmax = 0.4
@@ -316,7 +338,7 @@ Each TS image (one per sub-band/segment) in the output trajectory contains:
 - `image_energies`: List of floats — per-image energies in the sub-band
 - `image_fmax`: List of floats — per-image effective fmax in the sub-band
 - `nimages`: Total band size (for continue_from_result extraction)
-- `reaction_type`: (Dimer only) vacancy, hop_reuse, hop_insert, kickout_reuse, kickout_insert, ring, or unknown
+- `reaction_type`: (Dimer only) Bulk: vacancy, hop_reuse, hop_insert, kickout_reuse, kickout_insert, ring. OC: adsorbate_atom, adsorbate_atom_neighbors, adsorbate, diffusion, rotation, adsorbate_surface, surface. Both: initial_guess, desorption (overrides initialization type when desorption check triggers), unknown (fallback)
 - `orig_info`: Original `.info` dict from the input trajectory (stashed by `load_and_sanitize` to prevent per-atom array size mismatches)
 
 ## Execution Modes

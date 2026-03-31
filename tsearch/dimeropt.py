@@ -137,12 +137,14 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                 dim_rlx.attach(check_delocalization, interval=5)
                 dim_rlx.attach(check_desorption, interval=5)
 
+                stop_reason = None
                 stopped_early = False
                 converged = False
                 try:
                     converged = dim_rlx.run(fmax=config_dict["Main"]["fmax"], steps=config_dict["Main"]["steps"])
-                except StopRun:
+                except StopRun as e:
                     stopped_early = True
+                    stop_reason = str(e)
                     converged = False
 
                 if converged:
@@ -154,8 +156,9 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                     if fmax_check and curvature_check:
                         try:
                             converged = dim_rlx.run(fmax=config_dict["Main"]["fmax"], steps=150)
-                        except StopRun:
+                        except StopRun as e:
                             stopped_early = True
+                            stop_reason = str(e)
                             converged = False
 
                         if converged:
@@ -180,6 +183,8 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                 atoms.info['stoprun'] = 1 if stopped_early else 0
                 atoms.info['selected_index'] = slctd_indx
                 atoms.info['reaction_type'] = atoms.info.get('reaction_type', 'unknown')
+                if stop_reason and "desorbed" in stop_reason:
+                    atoms.info['reaction_type'] = 'desorption'
                 atoms.wrap()
 
                 writer.write(atoms)

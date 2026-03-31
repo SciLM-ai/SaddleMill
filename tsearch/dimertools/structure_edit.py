@@ -644,6 +644,200 @@ def get_ring_attempts(atoms, config_dict, num_attempts):
     return images, displacement_dicts, selected_indices
 
 
+# --- OC helpers ---
+
+def _get_oc_adsorbate_indices(atoms):
+    """Return indices of adsorbate atoms (tag=2, fallback to tag=1)."""
+    tags = atoms.get_tags()
+    indices = np.where(tags == 2)[0]
+    if len(indices) == 0:
+        indices = np.where(tags == 1)[0]
+    return indices
+
+
+def _get_oc_neighbor_mask(atoms, adsorbate_indices):
+    """Return a boolean list mask of all atoms neighboring the adsorbate."""
+    cutoffs = natural_cutoffs(atoms, mult=1.25)
+    nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
+    nl.update(atoms)
+
+    neighbor_indices = set()
+    for idx in adsorbate_indices:
+        indices, offsets = nl.get_neighbors(idx)
+        neighbor_indices.update(indices)
+    unique_neighbors = np.array(list(neighbor_indices))
+    mask = np.zeros(len(atoms), dtype=bool)
+    mask[unique_neighbors] = True
+    return mask.tolist()
+
+
+def _sample_adsorbate_atoms(adsorbate_indices, num_needed):
+    """Sample num_needed adsorbate atom indices, cycling if needed."""
+    if len(adsorbate_indices) >= num_needed:
+        return random.sample(list(adsorbate_indices), num_needed)
+    else:
+        chosen = list(adsorbate_indices) * (num_needed // len(adsorbate_indices))
+        remainder = num_needed % len(adsorbate_indices)
+        chosen.extend(random.sample(list(adsorbate_indices), remainder))
+        return chosen
+
+
+# --- OC reaction types ---
+
+def get_adsorbate_atom_attempts(atoms, config_dict, num_attempts):
+    """Tight Gaussian on one adsorbate atom (gauss_std=0.2, single atom)."""
+    adsorbate_indices = _get_oc_adsorbate_indices(atoms)
+    if len(adsorbate_indices) == 0:
+        warnings.warn("No adsorbate atoms (tag 1 or 2) found; skipping 'adsorbate_atom'.")
+        return [], [], []
+
+    chosen = _sample_adsorbate_atoms(adsorbate_indices, num_attempts)
+    images, displacement_dicts, selected_indices = [], [], []
+    for idx in chosen:
+        atoms_new = atoms.copy()
+        atoms_new.info['reaction_type'] = 'adsorbate_atom'
+        images.append(atoms_new)
+        displacement_dicts.append({"displacement_center": int(idx), "gauss_std": 0.2, "number_of_atoms": 1})
+        selected_indices.append(int(idx))
+    return images, displacement_dicts, selected_indices
+
+
+def get_adsorbate_atom_neighbors_attempts(atoms, config_dict, num_attempts):
+    """Broad Gaussian on one adsorbate atom (default DimerControl std, neighbors dragged)."""
+    adsorbate_indices = _get_oc_adsorbate_indices(atoms)
+    if len(adsorbate_indices) == 0:
+        warnings.warn("No adsorbate atoms (tag 1 or 2) found; skipping 'adsorbate_atom_neighbors'.")
+        return [], [], []
+
+    chosen = _sample_adsorbate_atoms(adsorbate_indices, num_attempts)
+    images, displacement_dicts, selected_indices = [], [], []
+    for idx in chosen:
+        atoms_new = atoms.copy()
+        atoms_new.info['reaction_type'] = 'adsorbate_atom_neighbors'
+        images.append(atoms_new)
+        displacement_dicts.append({"displacement_center": int(idx)})
+        selected_indices.append(int(idx))
+    return images, displacement_dicts, selected_indices
+
+
+def get_adsorbate_attempts(atoms, config_dict, num_attempts):
+    """Random noise mask on all adsorbate atoms (internal rearrangement)."""
+    adsorbate_indices = _get_oc_adsorbate_indices(atoms)
+    if len(adsorbate_indices) == 0:
+        warnings.warn("No adsorbate atoms (tag 1 or 2) found; skipping 'adsorbate'.")
+        return [], [], []
+
+    mask = np.zeros(len(atoms), dtype=bool)
+    mask[adsorbate_indices] = True
+    mask = mask.tolist()
+
+    images, displacement_dicts, selected_indices = [], [], []
+    for _ in range(num_attempts):
+        atoms_new = atoms.copy()
+        atoms_new.info['reaction_type'] = 'adsorbate'
+        images.append(atoms_new)
+        displacement_dicts.append({"mask": mask})
+        selected_indices.append(-1)
+    return images, displacement_dicts, selected_indices
+
+
+def get_diffusion_attempts(atoms, config_dict, num_attempts):
+    """Uniform translation of all adsorbate atoms in a random 3D direction."""
+    adsorbate_indices = _get_oc_adsorbate_indices(atoms)
+    if len(adsorbate_indices) == 0:
+        warnings.warn("No adsorbate atoms (tag 1 or 2) found; skipping 'diffusion'.")
+        return [], [], []
+
+    images, displacement_dicts, selected_indices = [], [], []
+    for _ in range(num_attempts):
+        atoms_new = atoms.copy()
+        atoms_new.info['reaction_type'] = 'diffusion'
+
+        direction = np.random.randn(3)
+        direction /= np.linalg.norm(direction)
+
+        disp = np.zeros((len(atoms), 3))
+        disp[adsorbate_indices] = direction * 0.1
+        displacement_dicts.append({"displacement_vector": disp, "method": "vector"})
+        selected_indices.append(-1)
+        images.append(atoms_new)
+    return images, displacement_dicts, selected_indices
+
+
+def get_rotation_attempts(atoms, config_dict, num_attempts):
+    """Rigid-body rotation of adsorbate around its center of mass."""
+    adsorbate_indices = _get_oc_adsorbate_indices(atoms)
+    if len(adsorbate_indices) == 0:
+        warnings.warn("No adsorbate atoms (tag 1 or 2) found; skipping 'rotation'.")
+        return [], [], []
+    if len(adsorbate_indices) < 2:
+        warnings.warn("Rotation requires at least 2 adsorbate atoms; skipping.")
+        return [], [], []
+
+    positions = atoms.get_positions()
+    masses = atoms.get_masses()
+    ads_positions = positions[adsorbate_indices]
+    ads_masses = masses[adsorbate_indices]
+    com = np.average(ads_positions, weights=ads_masses, axis=0)
+
+    images, displacement_dicts, selected_indices = [], [], []
+    for _ in range(num_attempts):
+        atoms_new = atoms.copy()
+        atoms_new.info['reaction_type'] = 'rotation'
+
+        axis = np.random.randn(3)
+        axis /= np.linalg.norm(axis)
+        angle = 0.05  # radians
+
+        disp = np.zeros((len(atoms), 3))
+        for idx in adsorbate_indices:
+            r = positions[idx] - com
+            disp[idx] = angle * np.cross(axis, r)
+
+        displacement_dicts.append({"displacement_vector": disp, "method": "vector"})
+        selected_indices.append(-1)
+        images.append(atoms_new)
+    return images, displacement_dicts, selected_indices
+
+
+def get_adsorbate_surface_attempts(atoms, config_dict, num_attempts):
+    """Random noise mask on adsorbate + neighboring substrate atoms."""
+    adsorbate_indices = _get_oc_adsorbate_indices(atoms)
+    if len(adsorbate_indices) == 0:
+        warnings.warn("No adsorbate atoms (tag 1 or 2) found; skipping 'adsorbate_surface'.")
+        return [], [], []
+
+    mask = _get_oc_neighbor_mask(atoms, adsorbate_indices)
+
+    images, displacement_dicts, selected_indices = [], [], []
+    for _ in range(num_attempts):
+        atoms_new = atoms.copy()
+        atoms_new.info['reaction_type'] = 'adsorbate_surface'
+        images.append(atoms_new)
+        displacement_dicts.append({"mask": mask})
+        selected_indices.append(-1)
+    return images, displacement_dicts, selected_indices
+
+
+def get_surface_attempts(atoms, config_dict, num_attempts):
+    """Broad Gaussian on one surface atom (tag=1)."""
+    tags = atoms.get_tags()
+    surface_indices = np.where(tags == 1)[0]
+    if len(surface_indices) == 0:
+        warnings.warn("No surface atoms (tag=1) found; skipping 'surface'.")
+        return [], [], []
+
+    chosen = _sample_adsorbate_atoms(surface_indices, num_attempts)
+    images, displacement_dicts, selected_indices = [], [], []
+    for idx in chosen:
+        atoms_new = atoms.copy()
+        atoms_new.info['reaction_type'] = 'surface'
+        images.append(atoms_new)
+        displacement_dicts.append({"displacement_center": int(idx)})
+        selected_indices.append(int(idx))
+    return images, displacement_dicts, selected_indices
+
+
 # --- Initial guess (no displacement) ---
 
 def get_initial_guess_attempts(atoms):
@@ -671,7 +865,7 @@ def get_initial_guess_attempts(atoms):
 
 # --- Main dispatch ---
 
-_REACTION_TYPE_DISPATCH = {
+_BULK_REACTION_TYPE_DISPATCH = {
     "vacancy": lambda atoms, config_dict, n: get_vacancy_attempts(atoms, config_dict, n),
     "hop_reuse": lambda atoms, config_dict, n: get_hop_reuse_attempts(atoms, n),
     "hop_insert": lambda atoms, config_dict, n: get_hop_insert_attempts(atoms, n),
@@ -680,6 +874,20 @@ _REACTION_TYPE_DISPATCH = {
     "ring": lambda atoms, config_dict, n: get_ring_attempts(atoms, config_dict, n),
     "initial_guess": lambda atoms, config_dict, n: get_initial_guess_attempts(atoms),
 }
+
+_OC_REACTION_TYPE_DISPATCH = {
+    "adsorbate_atom": lambda atoms, config_dict, n: get_adsorbate_atom_attempts(atoms, config_dict, n),
+    "adsorbate_atom_neighbors": lambda atoms, config_dict, n: get_adsorbate_atom_neighbors_attempts(atoms, config_dict, n),
+    "adsorbate": lambda atoms, config_dict, n: get_adsorbate_attempts(atoms, config_dict, n),
+    "diffusion": lambda atoms, config_dict, n: get_diffusion_attempts(atoms, config_dict, n),
+    "rotation": lambda atoms, config_dict, n: get_rotation_attempts(atoms, config_dict, n),
+    "adsorbate_surface": lambda atoms, config_dict, n: get_adsorbate_surface_attempts(atoms, config_dict, n),
+    "surface": lambda atoms, config_dict, n: get_surface_attempts(atoms, config_dict, n),
+    "initial_guess": lambda atoms, config_dict, n: get_initial_guess_attempts(atoms),
+}
+
+# Backward-compat alias
+_REACTION_TYPE_DISPATCH = _BULK_REACTION_TYPE_DISPATCH
 
 
 def get_attempts(atoms, config_dict):
@@ -706,9 +914,9 @@ def get_attempts(atoms, config_dict):
             if num_per_type is not None and num_per_type > 1:
                 warnings.warn(f"'initial_guess' always produces 1 attempt — ignoring num_attempts_per_type={num_per_type}")
         elif dataset_type == "oc":
-            num_attempts = config_dict["ourDimer"].get("num_attempts", 1)
-            if num_attempts is not None and num_attempts > 1:
-                warnings.warn(f"'initial_guess' always produces 1 attempt — ignoring num_attempts={num_attempts}")
+            num_per_type = config_dict["ourDimer"].get("num_attempts_per_type", 1)
+            if num_per_type is not None and num_per_type > 1:
+                warnings.warn(f"'initial_guess' always produces 1 attempt — ignoring num_attempts_per_type={num_per_type}")
             # Apply OC constraints (fix substrate atoms)
             tags = atoms.get_tags()
             indices = np.where(tags == 0)[0]
@@ -735,62 +943,39 @@ def get_attempts(atoms, config_dict):
         num_per_type = config_dict["ourDimer"].get("num_attempts_per_type", 1)
 
         for rtype in reaction_types_list:
-            if rtype not in _REACTION_TYPE_DISPATCH:
-                supported = ", ".join(_REACTION_TYPE_DISPATCH.keys())
-                raise ValueError(f"Unknown reaction type: '{rtype}'. "
+            if rtype not in _BULK_REACTION_TYPE_DISPATCH:
+                supported = ", ".join(_BULK_REACTION_TYPE_DISPATCH.keys())
+                raise ValueError(f"Unknown bulk reaction type: '{rtype}'. "
                                  f"Supported types: {supported}")
-            imgs, dds, idxs = _REACTION_TYPE_DISPATCH[rtype](atoms, config_dict, num_per_type)
+            imgs, dds, idxs = _BULK_REACTION_TYPE_DISPATCH[rtype](atoms, config_dict, num_per_type)
             images.extend(imgs)
             displacement_dicts.extend(dds)
             selected_indices.extend(idxs)
 
     elif config_dict["ourDimer"]["dataset_type"] == "oc":
 
+        # Fix substrate atoms (tag=0)
         tags = atoms.get_tags()
-        indices = np.where(tags == 0)[0]
-        atoms.set_constraint(FixAtoms(indices=indices))
+        substrate_indices = np.where(tags == 0)[0]
+        atoms.set_constraint(FixAtoms(indices=substrate_indices))
 
-        cutoffs = natural_cutoffs(atoms, mult=1.25)
-        nl = NeighborList(cutoffs, self_interaction=False, bothways=True)
-        nl.update(atoms)
+        if reaction_types is None:
+            raise ValueError(
+                "Configuration error: 'ourDimer' -> 'reaction_types' is not set. "
+                "Please specify reaction types (e.g., 'adsorbate_atom adsorbate diffusion') in config.ini. "
+                "Supported OC types: " + ", ".join(_OC_REACTION_TYPE_DISPATCH.keys()))
 
-        adsorbate_indices = np.where(tags == 2)[0]
-        if adsorbate_indices.shape[0] == 0:
-            adsorbate_indices = np.where(tags == 1)[0]
+        num_per_type = config_dict["ourDimer"].get("num_attempts_per_type", 1)
 
-        if len(adsorbate_indices) == 0:
-            warnings.warn("No adsorbate atoms (tag 1 or 2) found for 'oc' dataset; skipping.")
-            return [], [], []
-
-        neighbor_indices = set()
-        for idx in adsorbate_indices:
-            indices, offsets = nl.get_neighbors(idx)
-            neighbor_indices.update(indices)
-        unique_neighbors = np.array(list(neighbor_indices))
-        mask = np.zeros(len(atoms), dtype=bool)
-        mask[unique_neighbors] = True
-        mask = mask.tolist()
-
-        num_needed = config_dict["ourDimer"]["num_attempts"] // 3
-        if len(adsorbate_indices) >= num_needed:
-            chosen_indices = random.sample(list(adsorbate_indices), num_needed)
-        else:
-            chosen_indices = list(adsorbate_indices) * int(num_needed // len(adsorbate_indices))
-            remainder = num_needed % len(adsorbate_indices)
-            chosen_indices.extend(random.sample(list(adsorbate_indices), remainder))
-
-        for i in range(config_dict["ourDimer"]["num_attempts"]):
-            images.append(atoms.copy())
-
-            if i < num_needed:
-                displacement_dicts.append({"displacement_center": int(chosen_indices[i])})
-                selected_indices.append(int(chosen_indices[i]))
-            elif num_needed <= i < 2 * num_needed:
-                displacement_dicts.append({"displacement_center": int(chosen_indices[i - num_needed]), "gauss_std": 0.2, "number_of_atoms": 1})
-                selected_indices.append(int(chosen_indices[i - num_needed]))
-            else:
-                displacement_dicts.append({"mask": mask})
-                selected_indices.append(-1)
+        for rtype in reaction_types_list:
+            if rtype not in _OC_REACTION_TYPE_DISPATCH:
+                supported = ", ".join(_OC_REACTION_TYPE_DISPATCH.keys())
+                raise ValueError(f"Unknown OC reaction type: '{rtype}'. "
+                                 f"Supported types: {supported}")
+            imgs, dds, idxs = _OC_REACTION_TYPE_DISPATCH[rtype](atoms, config_dict, num_per_type)
+            images.extend(imgs)
+            displacement_dicts.extend(dds)
+            selected_indices.extend(idxs)
 
     else:
         raise Exception("dataset_type in ourDimer must be set")
