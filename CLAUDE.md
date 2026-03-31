@@ -108,6 +108,7 @@ Adsorbate atoms are identified by tag=2 (fallback tag=1). Substrate atoms (tag=0
 | `rotation` | `get_rotation_attempts()` | Rigid-body rotation of adsorbate around center of mass (molecular reorientation). Skips with warning for single-atom adsorbates. | `displacement_vector` (tangential, random axis, ~0.05 rad) |
 | `adsorbate_surface` | `get_adsorbate_surface_attempts()` | Random noise on adsorbate + neighboring substrate atoms (interface reactions, subsurface penetration) | Adsorbate+neighbors mask (natural_cutoffs * 1.25) |
 | `surface` | `get_surface_attempts()` | Broad Gaussian on one surface atom (tag=1) — surface reconstruction | `displacement_center` (default DimerControl std) |
+| `custom` | `get_custom_attempts()` | No overrides — displacement fully controlled by `[DimerControl]` settings (gauss_std, displacement_radius, displacement_method, etc.) | Empty dict (pure DimerControl defaults) |
 | `initial_guess` | `get_initial_guess_attempts()` | Same as bulk `initial_guess` (see above) | 0 (none) |
 
 **OC helper functions:**
@@ -235,7 +236,7 @@ allow_shared_calculator = True
 [ourDimer]
 dataset_type = oc            # oc | bulk
 reaction_types = vacancy     # Bulk: vacancy hop_reuse hop_insert kickout_reuse kickout_insert ring initial_guess
-                             # OC: adsorbate_atom adsorbate_atom_neighbors adsorbate diffusion rotation adsorbate_surface surface initial_guess
+                             # OC: adsorbate_atom adsorbate_atom_neighbors adsorbate diffusion rotation adsorbate_surface surface custom initial_guess
 num_attempts_per_type = 1    # Attempts per reaction type; total = len(types) * num_per_type
 ring_sizes = 3 4             # Ring sizes to sample from for 'ring' reaction type (bulk only)
 supercell = True             # Apply supercell expansion (min 7 Å) before generating attempts
@@ -338,7 +339,7 @@ Each TS image (one per sub-band/segment) in the output trajectory contains:
 - `image_energies`: List of floats — per-image energies in the sub-band
 - `image_fmax`: List of floats — per-image effective fmax in the sub-band
 - `nimages`: Total band size (for continue_from_result extraction)
-- `reaction_type`: (Dimer only) Bulk: vacancy, hop_reuse, hop_insert, kickout_reuse, kickout_insert, ring. OC: adsorbate_atom, adsorbate_atom_neighbors, adsorbate, diffusion, rotation, adsorbate_surface, surface. Both: initial_guess, desorption (overrides initialization type when desorption check triggers), unknown (fallback)
+- `reaction_type`: (Dimer only) Bulk: vacancy, hop_reuse, hop_insert, kickout_reuse, kickout_insert, ring. OC: adsorbate_atom, adsorbate_atom_neighbors, adsorbate, diffusion, rotation, adsorbate_surface, surface, custom. Both: initial_guess, desorption (overrides initialization type when desorption check triggers), unknown (fallback)
 - `orig_info`: Original `.info` dict from the input trajectory (stashed by `load_and_sanitize` to prevent per-atom array size mismatches)
 
 ## Execution Modes

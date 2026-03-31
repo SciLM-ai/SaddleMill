@@ -838,6 +838,18 @@ def get_surface_attempts(atoms, config_dict, num_attempts):
     return images, displacement_dicts, selected_indices
 
 
+def get_custom_attempts(atoms, config_dict, num_attempts):
+    """No overrides — displacement fully controlled by [DimerControl] settings."""
+    images, displacement_dicts, selected_indices = [], [], []
+    for _ in range(num_attempts):
+        atoms_new = atoms.copy()
+        atoms_new.info['reaction_type'] = 'custom'
+        images.append(atoms_new)
+        displacement_dicts.append({})
+        selected_indices.append(-1)
+    return images, displacement_dicts, selected_indices
+
+
 # --- Initial guess (no displacement) ---
 
 def get_initial_guess_attempts(atoms):
@@ -883,6 +895,7 @@ _OC_REACTION_TYPE_DISPATCH = {
     "rotation": lambda atoms, config_dict, n: get_rotation_attempts(atoms, config_dict, n),
     "adsorbate_surface": lambda atoms, config_dict, n: get_adsorbate_surface_attempts(atoms, config_dict, n),
     "surface": lambda atoms, config_dict, n: get_surface_attempts(atoms, config_dict, n),
+    "custom": lambda atoms, config_dict, n: get_custom_attempts(atoms, config_dict, n),
     "initial_guess": lambda atoms, config_dict, n: get_initial_guess_attempts(atoms),
 }
 
