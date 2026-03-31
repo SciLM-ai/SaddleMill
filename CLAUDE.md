@@ -78,7 +78,7 @@ catsunami/ocpneb.py  (OCPNEB: batched NEB with swDNEB switching)
 - Writes `reaction_type` to `atoms.info` for each attempt
 - **Per-attempt error handling**: Each dimer attempt has its own try/except, so one failing attempt does not abort remaining attempts for the same structure
 - **Consecutive error tracking**: Tracks structure-level errors via `consecutive_errors` counter (passed from `init_function`). If all attempts for a structure fail, counter increments; any successful attempt resets it to 0. When counter reaches `max_consecutive_errors`, worker calls `sys.exit(1)` to trigger executorlib restart (see Worker Health section)
-- **Continuation mode**: When `atoms_orig` is a list (from `continue_from_result`), `dimeropt` bypasses `get_attempts()` and uses `_continuation_iter()` instead. This generator extracts each attempt's eigenmode, reaction_type, and selected_index from `orig_info`, builds a negligible displacement, and yields the same `(attempt, (atoms, disp_dict, selected_index))` tuples as normal mode. The existing loop body handles both modes transparently — eigenmode is passed to `MinModeAtoms` via `eigenmodes=` kwarg when present in `atoms.info`.
+- **Continuation mode**: When `atoms_orig` is a list (from `continue_from_result`), `dimeropt` bypasses `get_attempts()` and uses `_continuation_iter()` instead. This generator extracts each attempt's `attempt_id` and `selected_index` from `orig_info` for the yield tuple, builds a negligible displacement, and yields `(attempt, (atoms, disp_dict, selected_index))` tuples. The atoms pass through with `orig_info` intact (following the `.info` handling rule). The loop body reads eigenmode and reaction_type from `orig_info` when not found at the top level.
 
 ### `dimertools/structure_edit.py` - Reaction Types for Dimer
 Dimer mode supports named reaction types, configured via `reaction_types` (space-separated list). Bulk and OC dataset types have separate type sets dispatched via `_BULK_REACTION_TYPE_DISPATCH` and `_OC_REACTION_TYPE_DISPATCH` respectively.
@@ -144,6 +144,10 @@ Adsorbate atoms are identified by tag=2 (fallback tag=1). Substrate atoms (tag=0
   - `_sanitize_with_continuation(atoms)`: Wraps `.info` into `orig_info` (like `load_and_sanitize`) and sets `_continuation = True` flag so method functions can detect continuation images.
 - Bond detection via ASE neighbor_list with natural cutoffs
 - `check_reaction()` / `check_adsorbate_reaction()`: Compare connectivity between structures
+
+### `.info` Handling Rule (applies to all methods)
+
+`orig_info` is set once at the entry point (`load_and_sanitize` for fresh runs, `_sanitize_with_continuation` for continuations) and **never modified after that**. It contains whatever `.info` was before this run started. Methods write their output keys to the top level of `.info`. When a method needs data that may come from a previous run (e.g., eigenmode, reaction_type), it checks the top level first, then falls back to `orig_info`. On continuation runs, `orig_info` nests (each layer contains the previous run's full `.info`, which itself has an `orig_info` from the run before it).
 
 ### `init_function.py` - Worker Initialization
 - Assigns GPU to worker based on executorlib_worker_id and jobs_per_gpu

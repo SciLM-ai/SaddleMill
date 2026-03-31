@@ -22,10 +22,10 @@ class StopRun(Exception):
 def _continuation_iter(continuation_atoms_list):
     """Convert continuation Atoms into (attempt, (atoms, disp_dict, selected_index)) tuples.
 
-    Each Atoms carries its original metadata in orig_info. We propagate
-    eigenmode and reaction_type into atoms.info so the existing loop body
-    picks them up. The displacement is negligible (structure is already
-    near the saddle point).
+    Each Atoms carries its previous run's metadata in orig_info (set by
+    _sanitize_with_continuation). The loop body reads eigenmode and
+    reaction_type from orig_info when not found at the top level.
+    The displacement is negligible (structure is already near the saddle point).
     """
     for atoms in continuation_atoms_list:
         orig = atoms.info.get("orig_info", atoms.info)
@@ -33,11 +33,6 @@ def _continuation_iter(continuation_atoms_list):
         slctd_indx = orig.get("selected_index", -1)
 
         atoms_new = atoms.copy()
-        atoms_new.info = {}
-        if "eigenmode" in orig:
-            atoms_new.info["eigenmode"] = np.array(orig["eigenmode"])
-        atoms_new.info["reaction_type"] = orig.get("reaction_type", "unknown")
-
         disp_dict = {"displacement_vector": np.random.randn(len(atoms_new), 3) * 1e-10, "method": "vector"}
         yield attempt, (atoms_new, disp_dict, slctd_indx)
 
@@ -98,12 +93,15 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                     **config_dict["DimerControl"],
                 )
 
-                # Use existing eigenmode from atoms.info if available (e.g. from
-                # a previous dimer/NEB run via initial_guess), otherwise let
-                # ASE derive one from the displacement.
+                # Use existing eigenmode if available (top level from
+                # get_attempts/initial_guess, or orig_info from continuation),
+                # otherwise let ASE derive one from the displacement.
                 eigenmode_kwarg = {}
+                orig = atoms.info.get('orig_info', {})
                 if 'eigenmode' in atoms.info:
                     eigenmode_kwarg['eigenmodes'] = [np.array(atoms.info['eigenmode'])]
+                elif 'eigenmode' in orig:
+                    eigenmode_kwarg['eigenmodes'] = [np.array(orig['eigenmode'])]
 
                 d_atoms = MinModeAtoms(atoms, d_control, **eigenmode_kwarg)
                 d_atoms.displace(**displacement_dict)
@@ -182,7 +180,8 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                 atoms.info['attempt_id'] = attempt
                 atoms.info['stoprun'] = 1 if stopped_early else 0
                 atoms.info['selected_index'] = slctd_indx
-                atoms.info['reaction_type'] = atoms.info.get('reaction_type', 'unknown')
+                orig = atoms.info.get('orig_info', {})
+                atoms.info['reaction_type'] = atoms.info.get('reaction_type', orig.get('reaction_type', 'unknown'))
                 if stop_reason and "desorbed" in stop_reason:
                     atoms.info['reaction_type'] = 'desorption'
                 atoms.wrap()
