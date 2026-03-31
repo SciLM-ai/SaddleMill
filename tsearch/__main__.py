@@ -40,7 +40,7 @@ def main():
             if method_name == "DoubleMinimization":
                 raise ValueError("continue_from_result is not supported for DoubleMinimization.")
 
-            # Only extract for jobs that have been previously run (not not_started)
+            # Only extract for jobs that have been previously run (not remaining)
             from tsearch.config import get_previous_job_status_df
             status_df = get_previous_job_status_df(config_dict)
             previously_run = set()

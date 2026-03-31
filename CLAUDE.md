@@ -172,7 +172,7 @@ fmax = 0.05                 # Force convergence criterion (eV/A)
 steps = 6000                # Maximum optimization steps
 jobs_per_gpu = 1            # Number of concurrent jobs per GPU
 Calculator = FAIRChemCalculator  # FAIRChemCalculator | Vasp | VaspInteractive
-run_jobs = not_started       # Which job categories to process (see below)
+run_jobs = remaining         # Which job categories to process (see below)
 continue_from_result = True # On resume, start from previous result instead of original input (see below)
 zip = True                  # Compress debug files
 max_consecutive_errors = 5  # Kill worker after N consecutive structures all-error (0 = disabled)
@@ -261,16 +261,16 @@ relax_cell = False
 |---|---|---|
 | `converged` | At least one attempt converged | `converged`, `converged_after_extension`, `converged_both`, `converged_min1`, `converged_min2`, `converged_only_CI` |
 | `not_converged` | Ran without convergence | `not_converged`, `not_converged_after_extension`, `not_converged_StopRun`, `unconverged` |
-| `error` | All attempts failed | `error`, `error: <message>` |
-| `not_started` | No CSV row for this job_id | (absence of rows) |
+| `errored` | All attempts failed | `error`, `error: <message>` |
+| `remaining` | No CSV row for this job_id | (absence of rows) |
 
 **Examples:**
 ```ini
-run_jobs = not_started                # Default. Fresh run: all jobs. Resume: continue unfinished.
-run_jobs = not_started error          # Resume + retry errors
+run_jobs = remaining                  # Default. Fresh run: all jobs. Resume: continue unfinished.
+run_jobs = remaining errored          # Resume + retry errors
 run_jobs = converged                  # Redo converged jobs (e.g., rerun with VASP)
 run_jobs = not_converged              # Redo unconverged jobs
-run_jobs = error                      # Retry only errors
+run_jobs = errored                    # Retry only errors
 run_jobs = all                        # Redo everything
 ```
 
@@ -279,15 +279,15 @@ run_jobs = all                        # Redo everything
 - **Output trajectories**: Archived as `{method}_trajes/previous_{N}.zip`, frames for re-run job IDs removed (filtered by `src_index`).
 - **Debug zips**: Archived as `{method}_debug_zips/previous_{N}.zip`, entries for re-run job IDs removed (filtered by job_id in filename via regex).
 
-Jobs with no prior entries (e.g., `not_started`) don't trigger archiving. The `previous_*.zip` archives in debug_zips are excluded from extraction scans (`_build_debug_zip_index` skips them).
+Jobs with no prior entries (e.g., `remaining`) don't trigger archiving. The `previous_*.zip` archives in debug_zips are excluded from extraction scans (`_build_debug_zip_index` skips them).
 
 **Fresh vs resume**: No explicit toggle — if `traj_files_ordered.json` doesn't exist, it's a fresh start; if it exists, it's a resume. To force a fresh start, delete the output directories and `traj_files_ordered.json`.
 
 ### `continue_from_result` — Continue from Previous Result
 
-When `continue_from_result = True` (default) and re-running previously completed jobs (any `run_jobs` category except `not_started`), the system extracts previous results and uses them as starting points instead of the original input trajectories.
+When `continue_from_result = True` (default) and re-running previously completed jobs (any `run_jobs` category except `remaining`), the system extracts previous results and uses them as starting points instead of the original input trajectories.
 
-Continuation is handled **per-job** inside each method function — no global config mutation. This means fresh jobs (`not_started`) and continuation jobs can coexist in the same batch without interference.
+Continuation is handled **per-job** inside each method function — no global config mutation. This means fresh jobs (`remaining`) and continuation jobs can coexist in the same batch without interference.
 
 **How it works per method:**
 

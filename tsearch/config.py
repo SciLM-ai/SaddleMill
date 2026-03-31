@@ -3,7 +3,8 @@ import os, re, glob, copy, pathlib, zipfile
 import pandas as pd
 from ase.io import Trajectory
 
-VALID_RUN_CATEGORIES = frozenset({"converged", "not_converged", "error", "not_started"})
+VALID_RUN_CATEGORIES = frozenset({"converged", "not_converged", "errored", "remaining"})
+_RUN_CATEGORY_ALIASES = {"not_started": "remaining", "error": "errored"}
 
 class ConfigManager:
     # 1. Define your Safe Defaults here
@@ -19,7 +20,7 @@ class ConfigManager:
             "device": 'cuda',
             "jobs_per_node": 1,  # this only used if device = 'cpu', otherwise jobs_per_gpu is used
             "jobs_per_gpu": 1,
-            "run_jobs": "not_started",
+            "run_jobs": "remaining",
             "continue_from_result": True,
             "zip": True,
             "max_consecutive_errors": 5,
@@ -296,6 +297,7 @@ def _normalize_run_jobs(run_jobs_value):
         cats = {str(c) for c in run_jobs_value}
     else:
         raise ValueError(f"Invalid run_jobs value: {run_jobs_value!r}")
+    cats = {_RUN_CATEGORY_ALIASES.get(c, c) for c in cats}
     invalid = cats - VALID_RUN_CATEGORIES
     if invalid:
         raise ValueError(
@@ -312,7 +314,7 @@ def _categorize_job(statuses):
     if any(s.startswith("converged") for s in statuses):
         return "converged"
     if all(s.startswith("error") for s in statuses):
-        return "error"
+        return "errored"
     return "not_converged"
 
 
@@ -333,7 +335,7 @@ def get_remaining_trajes(trajes_and_idxs, config_dict):
             if job_categories[idx] in categories_to_run:
                 remaining.append([idx, item])
         else:
-            if "not_started" in categories_to_run:
+            if "remaining" in categories_to_run:
                 remaining.append([idx, item])
 
     if not remaining:
@@ -370,7 +372,7 @@ def archive_and_clean_csvs(config_dict, job_ids):
             has_entries_to_clean = True
 
     if not has_entries_to_clean:
-        return  # All job_ids are not_started (no CSV entries) → pure append, skip archiving
+        return  # All job_ids are remaining (no CSV entries) → pure append, skip archiving
 
     # 1. Archive: zip all current CSVs as previous_{N}.zip
     n = 0
@@ -420,7 +422,7 @@ def archive_and_clean_outputs(config_dict, job_ids):
 
     Mirrors archive_and_clean_csvs: archive all current files into previous_{N}.zip,
     then filter out entries belonging to the re-run job_ids. Only triggers if
-    stale entries actually exist (skips for pure not_started jobs).
+    stale entries actually exist (skips for pure remaining jobs).
     """
     if not job_ids:
         return

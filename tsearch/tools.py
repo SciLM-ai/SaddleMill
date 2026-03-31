@@ -2,6 +2,7 @@ import numpy as np
 import json, os, glob, shutil, tempfile, zipfile
 from ase.neighborlist import neighbor_list, natural_cutoffs
 from ase.io import Trajectory
+from tsearch.config import VALID_RUN_CATEGORIES, _RUN_CATEGORY_ALIASES
 
 
 #==============================================================================
@@ -233,7 +234,8 @@ def extract_previous_results(job_ids, config_dict):
         # Filter attempts to match run_jobs categories
         run_jobs = config_dict["Main"]["run_jobs"]
         cats = set(run_jobs) if isinstance(run_jobs, list) else (
-            {"converged", "not_converged", "error", "not_started"} if run_jobs == "all" else {run_jobs})
+            set(VALID_RUN_CATEGORIES) if run_jobs == "all" else {run_jobs})
+        cats = {_RUN_CATEGORY_ALIASES.get(c, c) for c in cats}
         keep_conv = "converged" in cats
         keep_nconv = "not_converged" in cats
         for job_id in job_ids:

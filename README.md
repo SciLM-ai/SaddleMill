@@ -221,13 +221,13 @@ python -u -m tsearch
 
 tsearch automatically handles resume if a job times out or is interrupted:
 
-- **Resume unfinished jobs**: Just resubmit with the same `config.ini`. By default (`run_jobs = not_started`), only jobs that never ran are picked up. Already-completed jobs are skipped.
+- **Resume unfinished jobs**: Just resubmit with the same `config.ini`. By default (`run_jobs = remaining`), only jobs that never ran are picked up. Already-completed jobs are skipped.
 
 - **Redo specific categories**: Set `run_jobs` to target specific job outcomes:
   ```ini
   run_jobs = not_converged    # Redo unconverged jobs
   run_jobs = converged        # Redo converged jobs (e.g., refine with VASP)
-  run_jobs = error            # Retry errored jobs
+  run_jobs = errored          # Retry errored jobs
   run_jobs = all              # Redo everything
   ```
 
