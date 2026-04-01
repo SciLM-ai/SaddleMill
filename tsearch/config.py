@@ -48,6 +48,10 @@ class ConfigManager:
             "intermediate_minima_check_interval": 100,
             "intermediate_minima_min_depth": 0.05,
             "add_images_check_interval": 100,
+            "vasp_command_endpoints": None,
+            "vasp_ncore_endpoints": None,
+            "vasp_command_intermediates": None,
+            "vasp_ncore_intermediates": None,
         },
         "ourDimer": {
             "dataset_type": None,
