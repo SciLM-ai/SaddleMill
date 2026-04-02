@@ -379,6 +379,67 @@ CUDA device-side asserts (e.g., from fairchem's `radius_graph_pbc_v2` on degener
 
 **Note**: On restart, Flux may allocate a different node/GPU. The `worker_id` is preserved, but `CUDA_VISIBLE_DEVICES` assignment in `init_function` may compute incorrectly if `jobs_per_gpu > 1` and the new node has a different GPU count. For `jobs_per_gpu = 1` (the common case), this is not an issue since executorlib's own `gpus_per_core=1` handles GPU allocation.
 
+## Testing
+
+The project uses pytest with ~196 tests across 9 test files. Tests are split into CPU-only unit tests (run anywhere) and GPU integration tests (require CUDA).
+
+### Setup
+
+```bash
+pip install pytest pytest-timeout
+```
+
+### Running Tests
+
+```bash
+# CPU-only unit tests (login nodes, no GPU needed, ~40s)
+pytest -m "not gpu and not flux" -v
+
+# All tests (GPU node required, ~6 min)
+pytest -v --timeout=600
+
+# Only GPU integration tests
+pytest -m gpu -v
+
+# Single test file
+pytest tests/test_config.py -v
+```
+
+### Test Structure
+
+```
+tests/
+├── conftest.py                  # Shared fixtures, skip logic, make_config_dict() helper
+├── fixtures/                    # Small .traj files for tests
+│   ├── bulk_crystal.traj        # 3-atom FCC crystal (bulk dimer tests)
+│   ├── minimization_input.traj  # 68-atom slab+adsorbate (minimization tests)
+│   ├── oc_adsorbate_slab.traj   # 131-atom slab+adsorbate (OC dimer tests)
+│   └── oc_neb_pair.traj         # 10-frame NEB band, 68 atoms (NEB tests)
+├── test_config.py               # ConfigManager, load_*, run_jobs, archive/clean (~74 tests, CPU)
+├── test_tools.py                # load_and_sanitize, check_reaction, extract_previous_results (~28 tests, CPU)
+├── test_structure_edit.py       # All bulk & OC reaction types, supercell, interstitials (~35 tests, CPU)
+├── test_ocpneb.py               # swDNEB, _find_segment_ci, OCPNEB forces, frozen images (~20 tests, mixed)
+├── test_nebopt_integration.py   # Full NEB runs: interpolation, DNEB, imin, dimer_refine (8 tests, GPU)
+├── test_dimeropt_integration.py # Dimer: OC + bulk types, entries_to_run, error tracking (7 tests, GPU)
+├── test_geomopt_integration.py  # geomopt + doublegeomopt: cell relax, continuation (5 tests, GPU)
+├── test_init_function.py        # init_function return structure (5 tests, GPU)
+└── test_main_integration.py     # End-to-end serial pipeline + resume logic (4 tests, GPU)
+```
+
+### Markers
+
+- `@pytest.mark.gpu` — requires CUDA GPU (auto-skipped without one)
+- `@pytest.mark.flux` — requires Flux scheduler
+- `@pytest.mark.slow` — tests taking >60 seconds
+
+### Writing New Tests
+
+- Use `make_config_dict(method="NEB", **overrides)` from `tests/conftest.py` to build config dicts
+- GPU tests use the session-scoped `fairchem_calc` fixture (loads model once, shared across tests)
+- The `converged_ts_atoms` fixture generates a TS via Dimer for doublegeomopt tests
+- All method integration tests create output dirs in `tmp_path` and `monkeypatch.chdir()` there
+- CPU unit tests for structure_edit.py seed randomness with `random.seed(42)` + `np.random.seed(42)`
+
 ## HPC Setup (Perlmutter)
 
 ```bash

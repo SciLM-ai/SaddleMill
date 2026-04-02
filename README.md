@@ -248,3 +248,29 @@ reaction_types = initial_guess
 ```
 
 This is different from `continue_from_result`, which is an automatic mechanism for continuing a previous tsearch run. Use `initial_guess` when bringing a TS from outside tsearch; `continue_from_result` handles the "pick up where I left off" case internally.
+
+## Testing
+
+Install test dependencies:
+
+```bash
+pip install pytest pytest-timeout
+```
+
+Run CPU-only unit tests (no GPU needed, works on login nodes):
+
+```bash
+pytest -m "not gpu and not flux" -v
+```
+
+Run all tests (requires a GPU node):
+
+```bash
+pytest -v --timeout=600
+```
+
+Run only GPU integration tests:
+
+```bash
+pytest -m gpu -v
+```

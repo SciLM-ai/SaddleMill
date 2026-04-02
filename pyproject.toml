@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "tsearch"
+version = "0.1.0"
+description = "High-throughput transition state search using neural network potentials or DFT"
+requires-python = ">=3.10"
+dependencies = [
+    "ase>=3.22",
+    "numpy",
+    "pandas",
+    "scipy",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-timeout",
+]
+gpu = [
+    "fairchem-core",
+    "torch",
+]
+distributed = [
+    "executorlib",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: tests requiring CUDA GPU (deselect with '-m not gpu')",
+    "flux: tests requiring Flux scheduler + executorlib (deselect with '-m not flux')",
+    "slow: tests taking >60 seconds",
+]
+timeout = 600
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.setuptools.packages.find]
+include = ["tsearch*"]
