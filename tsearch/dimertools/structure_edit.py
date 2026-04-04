@@ -651,12 +651,9 @@ def get_ring_attempts(atoms, config_dict, num_attempts):
 # --- OC helpers ---
 
 def _get_oc_adsorbate_indices(atoms):
-    """Return indices of adsorbate atoms (tag=2, fallback to tag=1)."""
+    """Return indices of adsorbate atoms (tag=2)."""
     tags = atoms.get_tags()
-    indices = np.where(tags == 2)[0]
-    if len(indices) == 0:
-        indices = np.where(tags == 1)[0]
-    return indices
+    return np.where(tags == 2)[0]
 
 
 def _get_oc_neighbor_mask(atoms, adsorbate_indices):
@@ -692,7 +689,7 @@ def get_adsorbate_atom_attempts(atoms, config_dict, num_attempts):
     """Tight Gaussian on one adsorbate atom (gauss_std=0.2, single atom)."""
     adsorbate_indices = _get_oc_adsorbate_indices(atoms)
     if len(adsorbate_indices) == 0:
-        warnings.warn("No adsorbate atoms (tag 1 or 2) found; skipping 'adsorbate_atom'.")
+        warnings.warn("No adsorbate atoms (tag=2) found; skipping 'adsorbate_atom'.")
         return [None] * num_attempts, [None] * num_attempts, [-1] * num_attempts
 
     chosen = _sample_adsorbate_atoms(adsorbate_indices, num_attempts)
@@ -710,7 +707,7 @@ def get_adsorbate_atom_neighbors_attempts(atoms, config_dict, num_attempts):
     """Broad Gaussian on one adsorbate atom (default DimerControl std, neighbors dragged)."""
     adsorbate_indices = _get_oc_adsorbate_indices(atoms)
     if len(adsorbate_indices) == 0:
-        warnings.warn("No adsorbate atoms (tag 1 or 2) found; skipping 'adsorbate_atom_neighbors'.")
+        warnings.warn("No adsorbate atoms (tag=2) found; skipping 'adsorbate_atom_neighbors'.")
         return [None] * num_attempts, [None] * num_attempts, [-1] * num_attempts
 
     chosen = _sample_adsorbate_atoms(adsorbate_indices, num_attempts)
@@ -728,7 +725,7 @@ def get_adsorbate_attempts(atoms, config_dict, num_attempts):
     """Random noise mask on all adsorbate atoms (internal rearrangement)."""
     adsorbate_indices = _get_oc_adsorbate_indices(atoms)
     if len(adsorbate_indices) == 0:
-        warnings.warn("No adsorbate atoms (tag 1 or 2) found; skipping 'adsorbate'.")
+        warnings.warn("No adsorbate atoms (tag=2) found; skipping 'adsorbate'.")
         return [None] * num_attempts, [None] * num_attempts, [-1] * num_attempts
 
     mask = np.zeros(len(atoms), dtype=bool)
@@ -749,7 +746,7 @@ def get_diffusion_attempts(atoms, config_dict, num_attempts):
     """Uniform translation of all adsorbate atoms in a random 3D direction."""
     adsorbate_indices = _get_oc_adsorbate_indices(atoms)
     if len(adsorbate_indices) == 0:
-        warnings.warn("No adsorbate atoms (tag 1 or 2) found; skipping 'diffusion'.")
+        warnings.warn("No adsorbate atoms (tag=2) found; skipping 'diffusion'.")
         return [None] * num_attempts, [None] * num_attempts, [-1] * num_attempts
 
     images, displacement_dicts, selected_indices = [], [], []
@@ -772,7 +769,7 @@ def get_rotation_attempts(atoms, config_dict, num_attempts):
     """Rigid-body rotation of adsorbate around its center of mass."""
     adsorbate_indices = _get_oc_adsorbate_indices(atoms)
     if len(adsorbate_indices) == 0:
-        warnings.warn("No adsorbate atoms (tag 1 or 2) found; skipping 'rotation'.")
+        warnings.warn("No adsorbate atoms (tag=2) found; skipping 'rotation'.")
         return [None] * num_attempts, [None] * num_attempts, [-1] * num_attempts
     if len(adsorbate_indices) < 2:
         warnings.warn("Rotation requires at least 2 adsorbate atoms; skipping.")
@@ -808,7 +805,7 @@ def get_adsorbate_surface_attempts(atoms, config_dict, num_attempts):
     """Random noise mask on adsorbate + neighboring substrate atoms."""
     adsorbate_indices = _get_oc_adsorbate_indices(atoms)
     if len(adsorbate_indices) == 0:
-        warnings.warn("No adsorbate atoms (tag 1 or 2) found; skipping 'adsorbate_surface'.")
+        warnings.warn("No adsorbate atoms (tag=2) found; skipping 'adsorbate_surface'.")
         return [None] * num_attempts, [None] * num_attempts, [-1] * num_attempts
 
     mask = _get_oc_neighbor_mask(atoms, adsorbate_indices)

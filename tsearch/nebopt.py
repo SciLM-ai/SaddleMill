@@ -442,6 +442,12 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
                         except Exception as e:
                             print(f"Rank {rank}, structure {i}: imin relax error {imin_idx}: {e}", flush=True)
 
+                    # Restore fairchem calc on intermediates so OCPNEB batching
+                    # sees consistent AtomicData (SPC includes energy/forces
+                    # attributes that fairchem-calc images lack, breaking batching)
+                    for img in neb.images[1:-1]:
+                        img.calc = calc
+
                 # Continuation NEB with frozen converged images
                 if refine_band_steps > 0 and any_new_converged:
                     t_log = f'neb_refine_{i}{suffix}.log'
@@ -486,6 +492,13 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
             boundaries = sorted([0] + list(imin_set) + [neb.nimages - 1])
             state = NEBState(neb, neb.images, neb.energies)
     
+            # Set SPC on all images so plot_band() reads cached energies
+            # instead of calling (potentially stale) image calculators
+            for j in range(neb.nimages):
+                neb.images[j].calc = SinglePointCalculator(
+                    neb.images[j], energy=float(neb.energies[j]),
+                    forces=neb.real_forces[j])
+
             nebtools = NEBTools(neb.images)
             fig = nebtools.plot_band()
             fig.savefig(temp_plot)

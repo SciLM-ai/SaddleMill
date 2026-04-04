@@ -127,6 +127,59 @@ def _print_dimer_reaction_type_table(rows, config):
     print()
 
 
+def _print_neb_job_summary(rows, jobs_started):
+    """Print per-job convergence and sub-band count distribution for NEB."""
+    # Group by job_id: collect (sub_band_id, status) per job
+    job_data = {}  # {job_id: [(sub_band_id, status_string), ...]}
+    for row in rows:
+        job_id = int(row[0])
+        sub_band_id = int(row[2])
+        status = row[-1].strip()
+        job_data.setdefault(job_id, []).append((sub_band_id, status))
+
+    # Per-job convergence
+    job_converged = 0
+    job_converged_ci = 0
+    job_not_converged = 0
+    job_errored = 0
+    # Sub-band count distribution
+    subband_counts = {}  # {num_subbands: count}
+
+    for job_id, entries in job_data.items():
+        categories = [_categorize_status(s) for _, s in entries]
+        statuses = [s for _, s in entries]
+        num_subbands = len(set(sb for sb, _ in entries))
+        subband_counts[num_subbands] = subband_counts.get(num_subbands, 0) + 1
+
+        if "errored" in categories:
+            job_errored += 1
+        elif "not_converged" in categories:
+            job_not_converged += 1
+        elif all(s == "converged" for s in statuses):
+            job_converged += 1
+        else:
+            # All are converged or converged_CI, at least one converged_CI
+            job_converged_ci += 1
+
+    print(f"  Per-job convergence (all sub-bands must pass):")
+    print(f"    Converged:        {job_converged:>6}  ({100*job_converged/jobs_started:5.1f}%)")
+    print(f"    Converged (CI):   {job_converged_ci:>6}  ({100*job_converged_ci/jobs_started:5.1f}%)")
+    print(f"    Not converged:    {job_not_converged:>6}  ({100*job_not_converged/jobs_started:5.1f}%)")
+    print(f"    Errored:          {job_errored:>6}  ({100*job_errored/jobs_started:5.1f}%)")
+    print()
+
+    print(f"  Sub-band distribution:")
+    # Bucket 6+ together
+    bucketed = {}
+    for n, count in subband_counts.items():
+        key = n if n < 6 else 6
+        bucketed[key] = bucketed.get(key, 0) + count
+    for n in sorted(bucketed):
+        label = "6+" if n == 6 else f"{n}"
+        print(f"    {label} sub-band{'s' if n != 1 else ' '}: {bucketed[n]:>6} jobs")
+    print()
+
+
 def main():
     directory = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
     directory = os.path.abspath(directory)
@@ -192,6 +245,10 @@ def main():
         # Per-reaction-type table (Dimer only)
         if method == "Dimer":
             _print_dimer_reaction_type_table(rows, config)
+
+        # NEB per-job convergence and sub-band distribution
+        if method == "NEB":
+            _print_neb_job_summary(rows, jobs_started)
 
         # Detailed status breakdown
         print(f"  Detailed statuses:")

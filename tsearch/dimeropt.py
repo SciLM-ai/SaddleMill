@@ -64,6 +64,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
 
     # --- MAIN LOOP ---
     any_attempt_succeeded = False
+    all_attempts_none = False
 
     continuation_data = kwargs.get('continuation_data')  # {attempt_id: Atoms} or None
     entries_to_run = kwargs.get('entries_to_run')        # set of attempt_ids or None
@@ -74,7 +75,13 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
         slctd_indx = -1
         temp_files = []
 
-        attempts_iter = enumerate(zip(*get_attempts(atoms_orig, config_dict)))
+        generated = get_attempts(atoms_orig, config_dict)
+        all_attempts_none = all(a is None for a in generated[0])
+        if all_attempts_none:
+            print(f"Rank {rank} WARNING on structure {i}: "
+                  "All attempts failed to generate.", flush=True)
+
+        attempts_iter = enumerate(zip(*generated))
 
         for attempt, (atoms, displacement_dict, slctd_indx) in attempts_iter:
 
@@ -119,8 +126,14 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                     logfile=temp_opt_log, trajectory=temp_traj,
                 )
 
-                # PR Check
+                # PR Check — skip early steps to let the dimer rotate
+                # the eigenmode (initial displacement can look delocalized,
+                # especially for diffusion/rotation types).
+                delocalization_start_step = max(1, int(0.1 * config_dict["Main"]["steps"]))
+
                 def check_delocalization():
+                    if dim_rlx.nsteps < delocalization_start_step:
+                        return
                     mode = d_atoms.get_eigenmode()
                     v2 = (mode**2).sum(axis=1)
                     v2 = v2[free_indices]
@@ -227,5 +240,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
     if consecutive_errors is not None:
         if any_attempt_succeeded:
             consecutive_errors[0] = 0
+        elif all_attempts_none:
+            pass  # Data issue (e.g., no adsorbate atoms), not a worker error
         else:
             consecutive_errors[0] += 1
