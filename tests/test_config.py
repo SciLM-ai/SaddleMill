@@ -439,6 +439,10 @@ class TestCategorizeStatus:
     def test_not_converged_stoprun(self):
         assert _categorize_status("not_converged_StopRun") == "not_converged"
 
+    def test_invalid_status_raises(self):
+        with pytest.raises(ValueError, match="Unknown status string"):
+            _categorize_status("garbage")
+
 
 # ===================================================================
 # 7. TestGetTrajesAndIndices

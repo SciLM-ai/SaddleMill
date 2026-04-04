@@ -318,7 +318,9 @@ def _categorize_status(status):
         return "converged"
     if status.startswith("error"):
         return "errored"
-    return "not_converged"
+    if status.startswith("not_converged"):
+        return "not_converged"
+    raise ValueError(f"Unknown status string: {status!r}")
 
 
 def _categorize_statuses(statuses):
@@ -483,9 +485,9 @@ def _get_debug_filename_patterns(method_name):
     elif method_name == "Dimer":
         return [re.compile(r'^(?:ERROR_)?dimer_(?:control_|opt_)?(\d+)_(\d+)_')]
     elif method_name == "DoubleMinimization":
-        return [re.compile(r'^(?:ERROR_)?optimization_r\d+_(\d+)-(\d+)')]
+        return [re.compile(r'^(?:ERROR_)?optimization_(\d+)_(-?\d+)')]
     elif method_name == "Minimization":
-        return [re.compile(r'^(?:ERROR_)?optimization_r\d+_(\d+)')]
+        return [re.compile(r'^(?:ERROR_)?optimization_(\d+)')]
     return []
 
 
@@ -514,10 +516,8 @@ def _should_remove_debug(filename, patterns, cleaned, method_name):
     if method_name == "Minimization":
         return True  # No subunit, remove all for job
     if method_name == "DoubleMinimization":
-        # file_idx 0 → side=-1, file_idx 1 → side=1
         if subunit_id is not None:
-            side = -1 if subunit_id == 0 else 1
-            return side in cleaned[job_id]
+            return subunit_id in cleaned[job_id]
         return True  # Can't determine side, remove to be safe
     # Dimer and NEB: subunit_id directly matches
     if subunit_id is not None:

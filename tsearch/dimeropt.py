@@ -192,6 +192,8 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                 orig = atoms.info.get('orig_info', {})
                 atoms.info['reaction_type'] = atoms.info.get('reaction_type', orig.get('reaction_type', 'unknown'))
                 if stop_reason and "desorbed" in stop_reason:
+                    status = "converged_to_desorption"
+                    atoms.info['converged'] = 1
                     atoms.info['reaction_type'] = 'desorption'
                 atoms.wrap()
 

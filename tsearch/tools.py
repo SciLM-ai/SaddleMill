@@ -174,8 +174,8 @@ def extract_previous_results(job_ids, config_dict, redo_info):
                 for sid in grouped:
                     grouped[sid].sort(key=lambda a: a.info.get('image_idx', 0))
 
-            if method_name == "Dimer":
-                # Flatten: each attempt_id maps to a single Atoms
+            if method_name in ("Dimer", "DoubleMinimization"):
+                # Flatten: each subunit maps to a single Atoms
                 grouped = {sid: atoms_list[0] for sid, atoms_list in grouped.items()
                            if atoms_list}
 

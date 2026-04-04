@@ -451,12 +451,11 @@ class TestExtractPreviousResults:
         assert 3 in results
         grouped = results[3]
         assert isinstance(grouped, dict)
-        # All sides present in the grouped output (extraction groups all frames)
+        # All sides present, each flattened to a single Atoms (not a list)
         assert -1 in grouped and 0 in grouped and 1 in grouped
-        for side, atoms_list in grouped.items():
-            assert isinstance(atoms_list, list)
-            for atoms in atoms_list:
-                assert "orig_info" in atoms.info
+        for side, atoms in grouped.items():
+            assert not isinstance(atoms, list)
+            assert "orig_info" in atoms.info
 
     def test_missing_job_skipped(self, tmp_path, monkeypatch):
         """Jobs not in redo_info or with no output frames are skipped."""

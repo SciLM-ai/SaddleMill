@@ -43,8 +43,8 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
     # --- MAIN LOOP ---
     with Trajectory(my_output_file, 'a') as writer:
 
-        temp_opt_log = f'optimization_r{rank}_{i}.log'
-        temp_traj = f'optimization_r{rank}_{i}.traj'
+        temp_opt_log = f'optimization_{i}.log'
+        temp_traj = f'optimization_{i}.traj'
         temp_files = [temp_opt_log, temp_traj]
 
         try:
@@ -120,12 +120,17 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
         parent_source_idx = orig['src_index']
         try:
             if not orig['converged']:
-                raise Exception("Input structure marked as unconverged.")
+                msg = "Input structure marked as unconverged."
+                print(f"Rank {rank} WARNING on structure {i}: {msg}", flush=True)
+                for side in [-1, 1]:
+                    if entries_to_run is None or side in entries_to_run:
+                        log_status(side, parent_source_idx, f"error: {msg}")
+                return
 
             if 'eigenmode' not in orig:
-                 raise Exception("Input structure missing 'eigenmode' in info.")
+                raise Exception("Input structure missing 'eigenmode' in info.")
             if 'src_index' not in orig:
-                 raise Exception("Input structure missing 'src_index' in info.")
+                raise Exception("Input structure missing 'src_index' in info.")
 
             # Identify IDs
             refined_eigenmode = orig['eigenmode']
@@ -143,11 +148,29 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
             # --- MINIMIZE BOTH SIDES ---
             mins = {}  # side -> (atoms, converged)
             displacement = 0.25
+
+            # Desorption: only optimize toward bound state, skip desorption direction
+            skip_side = None
+            if orig.get('reaction_type') == 'desorption':
+                energies = {}
+                for test_side in [-1, 1]:
+                    test_atoms = ts_atoms.copy()
+                    test_atoms.calc = calc
+                    test_atoms.positions += -test_side * displacement * refined_eigenmode
+                    energies[test_side] = test_atoms.get_potential_energy()
+                skip_side = max(energies, key=energies.get)
+
             for side in [-1, 1]:
                 should_run = entries_to_run is None or side in entries_to_run
-                file_idx = 0 if side == -1 else 1
 
-                if should_run:
+                if side == skip_side:
+                    # Desorption direction: use TS as placeholder, no optimization
+                    min_atoms = ts_atoms.copy()
+                    min_atoms.calc = SinglePointCalculator(min_atoms,
+                        energy=ts_atoms.get_potential_energy(),
+                        forces=ts_atoms.get_forces())
+                    conv = True
+                elif should_run:
                     if continuation_data and side in continuation_data and continue_from_result:
                         min_atoms = continuation_data[side].copy()
                         min_atoms.calc = calc
@@ -156,8 +179,8 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                         min_atoms.calc = calc
                         min_atoms.positions += -side * displacement * refined_eigenmode
 
-                    log_f = f'optimization_r{rank}_{i}-{file_idx}.log'
-                    traj_f = f'optimization_r{rank}_{i}-{file_idx}.traj'
+                    log_f = f'optimization_{i}_{side}.log'
+                    traj_f = f'optimization_{i}_{side}.traj'
                     temp_files.extend([log_f, traj_f])
 
                     optimizable = FrechetCellFilter(min_atoms) if config_dict['our'+method_name]['relax_cell'] else min_atoms
@@ -180,39 +203,23 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
 
             # --- CHECK REACTION ---
             neighbor_fudge = 1.25
-            res  = check_reaction(min1, min2, neighbor_fudge=neighbor_fudge)
-            is_reaction = res["occurred"]
-            broken_bonds = res["broken_bonds"]
-            formed_bonds = res["formed_bonds"]
-            n_broken = res["n_broken"]
-            n_formed = res["n_formed"]
-            res = check_adsorbate_reaction(min1, min2, neighbor_fudge=neighbor_fudge,
-                                           target_tag=2)
-            is_ads_reaction = res["occurred"]
-            ads_broken_bonds = res["broken_bonds"]
-            ads_formed_bonds = res["formed_bonds"]
-            ads_n_broken = res["n_broken"]
-            ads_n_formed = res["n_formed"]
-            min1.info['is_reaction'] = is_reaction
-            min1.info['n_formed_bonds'] = n_formed
-            min1.info['n_broken_bonds'] = n_broken
-            min1.info['is_ads_reaction'] = is_ads_reaction
-            min1.info['n_ads_formed_bonds'] = ads_n_formed
-            min1.info['n_ads_broken_bonds'] = ads_n_broken
-
-            min2.info['is_reaction'] = is_reaction
-            min2.info['n_formed_bonds'] = n_formed
-            min2.info['n_broken_bonds'] = n_broken
-            min2.info['is_ads_reaction'] = is_ads_reaction
-            min2.info['n_ads_formed_bonds'] = ads_n_formed
-            min2.info['n_ads_broken_bonds'] = ads_n_broken
-
-            ts_atoms.info['is_reaction'] = is_reaction
-            ts_atoms.info['n_formed_bonds'] = n_formed
-            ts_atoms.info['n_broken_bonds'] = n_broken
-            ts_atoms.info['is_ads_reaction'] = is_ads_reaction
-            ts_atoms.info['n_ads_formed_bonds'] = ads_n_formed
-            ts_atoms.info['n_ads_broken_bonds'] = ads_n_broken
+            res = check_reaction(min1, min2, neighbor_fudge=neighbor_fudge)
+            ads_res = check_adsorbate_reaction(min1, min2, neighbor_fudge=neighbor_fudge,
+                                               target_tag=2)
+            reaction_info = {
+                'is_reaction': res['occurred'],
+                'broken_bonds': sorted(res['broken_bonds']),
+                'formed_bonds': sorted(res['formed_bonds']),
+                'n_formed_bonds': res['n_formed'],
+                'n_broken_bonds': res['n_broken'],
+                'is_ads_reaction': ads_res['occurred'],
+                'ads_broken_bonds': sorted(ads_res['broken_bonds']),
+                'ads_formed_bonds': sorted(ads_res['formed_bonds']),
+                'n_ads_formed_bonds': ads_res['n_formed'],
+                'n_ads_broken_bonds': ads_res['n_broken'],
+            }
+            for obj in [min1, min2, ts_atoms]:
+                obj.info.update(reaction_info)
             ts_atoms.info['side'] = 0
             ts_atoms.info['src_index'] = i
 
@@ -226,7 +233,10 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
 
             for side, (_, conv) in mins.items():
                 if entries_to_run is None or side in entries_to_run:
-                    log_status(side, parent_source_idx, "converged" if conv else "not_converged")
+                    if side == skip_side:
+                        log_status(side, parent_source_idx, "converged_desorption_skipped")
+                    else:
+                        log_status(side, parent_source_idx, "converged" if conv else "not_converged")
 
             if consecutive_errors is not None:
                 consecutive_errors[0] = 0

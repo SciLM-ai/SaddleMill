@@ -217,6 +217,7 @@ dimer_separation = 0.01
                 status = parts[4]
                 valid_statuses = {
                     "converged", "converged_after_extension",
+                    "converged_to_desorption",
                     "not_converged", "not_converged_after_extension",
                     "not_converged_StopRun",
                 }

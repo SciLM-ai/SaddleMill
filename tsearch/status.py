@@ -11,27 +11,17 @@ import sys
 import glob
 import json
 import csv
-import configparser
 
-
-def _categorize_status(status_str):
-    """Categorize a CSV status string into converged/not_converged/errored."""
-    if status_str.startswith("converged"):
-        return "converged"
-    elif status_str.startswith("error"):
-        return "errored"
-    return "not_converged"
+from .config import ConfigManager, _categorize_status
 
 
 def _read_config(directory):
-    """Read method from config.ini."""
+    """Read config using ConfigManager."""
     config_path = os.path.join(directory, "config.ini")
     if not os.path.exists(config_path):
         print(f"Error: No config.ini found in {directory}")
         sys.exit(1)
-    config = configparser.ConfigParser()
-    config.read(config_path)
-    return config
+    return ConfigManager(config_path)
 
 
 def _get_total_jobs(directory):
@@ -59,12 +49,15 @@ def _read_status_csvs(method_name, directory):
 def _compute_expected_entries_per_job(method_name, config):
     """Compute expected entries per job from config, if possible."""
     if method_name == "Dimer":
-        reaction_types = config.get("ourDimer", "reaction_types", fallback=None)
+        reaction_types = config.get_value("ourDimer", "reaction_types")
         if reaction_types:
-            num_types = len(reaction_types.split())
+            if isinstance(reaction_types, list):
+                num_types = len(reaction_types)
+            else:
+                num_types = len(reaction_types.split())
         else:
             return None
-        num_per_type = config.getint("ourDimer", "num_attempts_per_type", fallback=1)
+        num_per_type = config.get_value("ourDimer", "num_attempts_per_type", 1)
         return num_types * num_per_type
     elif method_name == "DoubleMinimization":
         return 2
@@ -85,11 +78,14 @@ def _get_dimer_reaction_type(attempt_id, reaction_types_list, num_per_type):
 
 def _print_dimer_reaction_type_table(rows, config):
     """Print per-reaction-type breakdown table for Dimer jobs."""
-    reaction_types = config.get("ourDimer", "reaction_types", fallback=None)
+    reaction_types = config.get_value("ourDimer", "reaction_types")
     if not reaction_types:
         return
-    reaction_types_list = reaction_types.split()
-    num_per_type = config.getint("ourDimer", "num_attempts_per_type", fallback=1)
+    if isinstance(reaction_types, list):
+        reaction_types_list = reaction_types
+    else:
+        reaction_types_list = reaction_types.split()
+    num_per_type = config.get_value("ourDimer", "num_attempts_per_type", 1)
 
     # Accumulate counts per reaction type
     type_stats = {}  # {rtype: {converged, not_converged, errored, total}}
@@ -140,7 +136,7 @@ def main():
         sys.exit(1)
 
     config = _read_config(directory)
-    method = config.get("Main", "method")
+    method = config.get_value("Main", "method")
     total_jobs = _get_total_jobs(directory)
     rows = _read_status_csvs(method, directory)
     entries_per_job = _compute_expected_entries_per_job(method, config)
