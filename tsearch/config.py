@@ -1,6 +1,6 @@
 import configparser
+import csv
 import os, re, glob, copy, pathlib, zipfile
-import pandas as pd
 from ase.io import Trajectory
 
 VALID_RUN_CATEGORIES = frozenset({"converged", "not_converged", "errored", "remaining"})
@@ -278,19 +278,16 @@ def create_results_directories(config_dict):
         pathlib.Path(d).mkdir(exist_ok=False)
 
 
-def get_previous_job_status_df(config_dict):
-    file_list = glob.glob(os.path.join(f"{config_dict['Main']['method']}_status_csvs/", "*.csv"))
-    if not file_list:
-        return pd.DataFrame()
-    dfs = []
-    for f in file_list:
-        try:
-            dfs.append(pd.read_csv(f, header=None))
-        except pd.errors.EmptyDataError:
-            continue
-    if not dfs:
-        return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True)
+def read_status_csv_rows(method_name, directory="."):
+    """Read all status CSV rows. Returns list of lists of strings (one per row)."""
+    csv_dir = os.path.join(directory, f"{method_name}_status_csvs")
+    rows = []
+    for csv_path in sorted(glob.glob(os.path.join(csv_dir, "status_rank_*.csv"))):
+        with open(csv_path) as fh:
+            for row in csv.reader(fh):
+                if row:
+                    rows.append(row)
+    return rows
 
 
 def _normalize_run_jobs(run_jobs_value):
@@ -320,7 +317,7 @@ def _categorize_status(status):
         return "errored"
     if status.startswith("not_converged"):
         return "not_converged"
-    raise ValueError(f"Unknown status string: {status!r}")
+    return "errored"
 
 
 def _categorize_statuses(statuses):
@@ -330,14 +327,14 @@ def _categorize_statuses(statuses):
 
 def get_remaining_trajes(trajes_and_idxs, config_dict):
     categories_to_run = _normalize_run_jobs(config_dict["Main"]["run_jobs"])
-    status_df = get_previous_job_status_df(config_dict)
+    rows = read_status_csv_rows(config_dict["Main"]["method"])
 
     job_categories = {}
-    if not status_df.empty:
-        for job_id, group in status_df.groupby(status_df.iloc[:, 0]):
-            job_categories[job_id] = _categorize_statuses(
-                group.iloc[:, -1].astype(str).tolist()
-            )
+    for row in rows:
+        job_id = int(row[0])
+        status = row[-1].strip()
+        job_categories.setdefault(job_id, []).append(status)
+    job_categories = {jid: _categorize_statuses(statuses) for jid, statuses in job_categories.items()}
 
     remaining = []
     for idx, item in enumerate(trajes_and_idxs):
@@ -367,21 +364,18 @@ def build_redo_info(job_ids, config_dict):
     categories_to_run = _normalize_run_jobs(config_dict["Main"]["run_jobs"])
     method_name = config_dict["Main"]["method"]
     subunit_col, _ = _get_subunit_config(method_name)
-    status_df = get_previous_job_status_df(config_dict)
+    rows = read_status_csv_rows(method_name)
 
     job_ids_set = set(job_ids)
     redo_info = {}
 
-    if status_df.empty:
-        return redo_info
-
-    for _, row in status_df.iterrows():
-        jid = row.iloc[0]
+    for row in rows:
+        jid = int(row[0])
         if jid not in job_ids_set:
             continue
-        status = str(row.iloc[-1])
+        status = row[-1].strip()
         if _categorize_status(status) in categories_to_run:
-            subunit_id = int(row.iloc[subunit_col]) if subunit_col is not None else None
+            subunit_id = int(row[subunit_col]) if subunit_col is not None else None
             redo_info.setdefault(jid, set()).add(subunit_id)
 
     return redo_info
@@ -421,15 +415,15 @@ def archive_and_clean_csvs(config_dict, job_ids, categories_to_clean):
 
     subunit_col, _ = _get_subunit_config(method_name)
     job_ids_set = set(job_ids)
-    csv_data = {}
+    csv_data = {}  # {filepath: list of rows}
     has_entries_to_clean = False
     for f in csv_files:
-        try:
-            df = pd.read_csv(f, header=None)
-        except pd.errors.EmptyDataError:
+        with open(f) as fh:
+            rows = [row for row in csv.reader(fh) if row]
+        if not rows:
             continue
-        csv_data[f] = df
-        if df.iloc[:, 0].isin(job_ids_set).any():
+        csv_data[f] = rows
+        if any(int(row[0]) in job_ids_set for row in rows):
             has_entries_to_clean = True
 
     if not has_entries_to_clean:
@@ -446,23 +440,22 @@ def archive_and_clean_csvs(config_dict, job_ids, categories_to_clean):
 
     # 2. Clean: remove only rows whose status category matches categories_to_clean
     cleaned = {}  # {job_id: set of subunit_ids}
-    for f, df in csv_data.items():
-        to_remove = []
-        for row_idx, row in df.iterrows():
-            jid = row.iloc[0]
-            if jid not in job_ids_set:
-                continue
-            status = str(row.iloc[-1])
-            if _categorize_status(status) in categories_to_clean:
-                to_remove.append(row_idx)
-                subunit_id = int(row.iloc[subunit_col]) if subunit_col is not None else None
+    for f, rows in csv_data.items():
+        kept = []
+        for row in rows:
+            jid = int(row[0])
+            status = row[-1].strip()
+            if jid in job_ids_set and _categorize_status(status) in categories_to_clean:
+                subunit_id = int(row[subunit_col]) if subunit_col is not None else None
                 cleaned.setdefault(jid, set()).add(subunit_id)
-        if to_remove:
-            filtered = df.drop(to_remove)
-            if filtered.empty:
+            else:
+                kept.append(row)
+        if len(kept) < len(rows):
+            if not kept:
                 os.remove(f)
             else:
-                filtered.to_csv(f, header=False, index=False)
+                with open(f, 'w', newline='') as fh:
+                    csv.writer(fh).writerows(kept)
 
     return cleaned
 

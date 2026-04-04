@@ -157,7 +157,7 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
 
     def log_status(status_msg, sub_band_id=0):
         with open(status_file, 'a') as f:
-            f.write(f"{i},{rank},{sub_band_id},{status_msg}\n")
+            f.write(f'{i},{rank},{sub_band_id},"{status_msg}"\n')
 
     for subband_idx_override, images, initial_imin_set in runs:
         perform_aseidpp = False

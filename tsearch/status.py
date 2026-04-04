@@ -8,11 +8,9 @@ If directory is not specified, uses the current working directory.
 
 import os
 import sys
-import glob
 import json
-import csv
 
-from .config import ConfigManager, _categorize_status
+from .config import ConfigManager, _categorize_status, read_status_csv_rows
 
 
 def _read_config(directory):
@@ -32,18 +30,6 @@ def _get_total_jobs(directory):
     with open(json_path) as f:
         data = json.load(f)
     return len(data)
-
-
-def _read_status_csvs(method_name, directory):
-    """Read all status CSVs. Returns list of rows (each row is a list of strings)."""
-    csv_dir = os.path.join(directory, f"{method_name}_status_csvs")
-    rows = []
-    for csv_path in sorted(glob.glob(os.path.join(csv_dir, "status_rank_*.csv"))):
-        with open(csv_path) as f:
-            for row in csv.reader(f):
-                if row:
-                    rows.append(row)
-    return rows
 
 
 def _compute_expected_entries_per_job(method_name, config):
@@ -116,13 +102,15 @@ def _print_dimer_reaction_type_table(rows, config):
         s = type_stats.get(rtype)
         if s is None:
             continue
-        conv_pct = 100 * s["converged"] / s["total"] if s["total"] > 0 else 0
+        finished = s["converged"] + s["not_converged"]
+        conv_pct = 100 * s["converged"] / finished if finished > 0 else 0
         print(f"    {rtype:<{max_name}s}  {s['total']:>6d}  {s['converged']:>6d}  {s['not_converged']:>8d}  {s['errored']:>6d}  {conv_pct:>5.1f}%")
 
     # Show 'unknown' if any
     if "unknown" in type_stats:
         s = type_stats["unknown"]
-        conv_pct = 100 * s["converged"] / s["total"] if s["total"] > 0 else 0
+        finished = s["converged"] + s["not_converged"]
+        conv_pct = 100 * s["converged"] / finished if finished > 0 else 0
         print(f"    {'unknown':<{max_name}s}  {s['total']:>6d}  {s['converged']:>6d}  {s['not_converged']:>8d}  {s['errored']:>6d}  {conv_pct:>5.1f}%")
     print()
 
@@ -161,11 +149,17 @@ def _print_neb_job_summary(rows, jobs_started):
             # All are converged or converged_CI, at least one converged_CI
             job_converged_ci += 1
 
+    jobs_finished = job_converged + job_converged_ci + job_not_converged
     print(f"  Per-job convergence (all sub-bands must pass):")
-    print(f"    Converged:        {job_converged:>6}  ({100*job_converged/jobs_started:5.1f}%)")
-    print(f"    Converged (CI):   {job_converged_ci:>6}  ({100*job_converged_ci/jobs_started:5.1f}%)")
-    print(f"    Not converged:    {job_not_converged:>6}  ({100*job_not_converged/jobs_started:5.1f}%)")
-    print(f"    Errored:          {job_errored:>6}  ({100*job_errored/jobs_started:5.1f}%)")
+    if jobs_finished > 0:
+        print(f"    Converged:        {job_converged:>6}  ({100*job_converged/jobs_finished:5.1f}% of finished)")
+        print(f"    Converged (CI):   {job_converged_ci:>6}  ({100*job_converged_ci/jobs_finished:5.1f}% of finished)")
+        print(f"    Not converged:    {job_not_converged:>6}  ({100*job_not_converged/jobs_finished:5.1f}% of finished)")
+    else:
+        print(f"    Converged:        {job_converged:>6}")
+        print(f"    Converged (CI):   {job_converged_ci:>6}")
+        print(f"    Not converged:    {job_not_converged:>6}")
+    print(f"    Errored:          {job_errored:>6}  ({100*job_errored/jobs_started:5.1f}% of total)")
     print()
 
     print(f"  Sub-band distribution:")
@@ -191,7 +185,7 @@ def main():
     config = _read_config(directory)
     method = config.get_value("Main", "method")
     total_jobs = _get_total_jobs(directory)
-    rows = _read_status_csvs(method, directory)
+    rows = read_status_csv_rows(method, directory)
     entries_per_job = _compute_expected_entries_per_job(method, config)
 
     # Group entries by job_id, categorize each
@@ -236,10 +230,15 @@ def main():
         print(f"    Expected:      {expected:>6}  ({entries_per_job} per job x {total_jobs} jobs)")
     print(f"    Completed:     {total_entries:>6}")
     if total_entries > 0:
+        finished = cats['converged'] + cats['not_converged']
         print()
-        print(f"    Converged:     {cats['converged']:>6}  ({100*cats['converged']/total_entries:5.1f}%)")
-        print(f"    Not converged: {cats['not_converged']:>6}  ({100*cats['not_converged']/total_entries:5.1f}%)")
-        print(f"    Errored:       {cats['errored']:>6}  ({100*cats['errored']/total_entries:5.1f}%)")
+        if finished > 0:
+            print(f"    Converged:     {cats['converged']:>6}  ({100*cats['converged']/finished:5.1f}% of finished)")
+            print(f"    Not converged: {cats['not_converged']:>6}  ({100*cats['not_converged']/finished:5.1f}% of finished)")
+        else:
+            print(f"    Converged:     {cats['converged']:>6}")
+            print(f"    Not converged: {cats['not_converged']:>6}")
+        print(f"    Errored:       {cats['errored']:>6}  ({100*cats['errored']/total_entries:5.1f}% of total)")
         print()
 
         # Per-reaction-type table (Dimer only)

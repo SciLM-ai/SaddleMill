@@ -439,9 +439,8 @@ class TestCategorizeStatus:
     def test_not_converged_stoprun(self):
         assert _categorize_status("not_converged_StopRun") == "not_converged"
 
-    def test_invalid_status_raises(self):
-        with pytest.raises(ValueError, match="Unknown status string"):
-            _categorize_status("garbage")
+    def test_unknown_status_defaults_to_errored(self):
+        assert _categorize_status("garbage") == "errored"
 
 
 # ===================================================================
@@ -608,13 +607,14 @@ class TestArchiveAndClean:
         assert 0 in cleaned[0]
 
         # CSV should still have the not_converged row for job 0 and the row for job 1
-        import pandas as pd
-        remaining_df = pd.read_csv(str(csv_path), header=None)
-        assert len(remaining_df) == 2
+        import csv
+        with open(str(csv_path)) as f:
+            remaining_rows = [row for row in csv.reader(f) if row]
+        assert len(remaining_rows) == 2
         # job_id=0, attempt=1 (not_converged) should remain
-        job0_rows = remaining_df[remaining_df.iloc[:, 0] == 0]
+        job0_rows = [r for r in remaining_rows if int(r[0]) == 0]
         assert len(job0_rows) == 1
-        assert job0_rows.iloc[0, 2] == 1  # attempt_id=1
+        assert int(job0_rows[0][2]) == 1  # attempt_id=1
 
     def test_incremental_numbering(self, tmp_path, monkeypatch):
         """Second archive creates previous_1.zip (not overwriting previous_0.zip)."""

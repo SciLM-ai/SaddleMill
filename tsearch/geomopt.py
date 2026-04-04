@@ -38,7 +38,7 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
 
     def log_status(status_msg):
         with open(status_file, 'a') as f:
-            f.write(f"{i},{rank},{status_msg}\n")
+            f.write(f'{i},{rank},"{status_msg}"\n')
 
     # --- MAIN LOOP ---
     with Trajectory(my_output_file, 'a') as writer:
@@ -109,7 +109,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
 
     def log_status(side_id, parent_source_idx, status_msg):
         with open(status_file, 'a') as f:
-            f.write(f"{i},{rank},{side_id},{parent_source_idx},{status_msg}\n")
+            f.write(f'{i},{rank},{side_id},{parent_source_idx},"{status_msg}"\n')
 
     # 3. Initialize list to track temp files from BOTH optimizations
     temp_files = []

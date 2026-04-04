@@ -60,7 +60,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
 
     def log_status(attempt, slctd_indx, status_msg):
         with open(status_file, 'a') as f:
-            f.write(f"{i},{rank},{attempt},{slctd_indx},{status_msg}\n")
+            f.write(f'{i},{rank},{attempt},{slctd_indx},"{status_msg}"\n')
 
     # --- MAIN LOOP ---
     any_attempt_succeeded = False
