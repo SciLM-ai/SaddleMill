@@ -91,7 +91,13 @@ def _expand_band(neb, fmax_threshold, max_num_frames, num_frames, calc):
             new_images.append(midpoint)
         new_images.append(neb.images[img_idx])
 
-    return new_images
+    return new_images, expand_gaps
+
+
+def _remap_indices(old_indices, expand_gaps):
+    """Map old band indices to new indices after _expand_band insertion."""
+    return {old_idx + sum(1 for g in expand_gaps if g < old_idx)
+            for old_idx in old_indices}
 
 
 def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, executorlib_worker_id=None, **kwargs):
@@ -351,8 +357,13 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
                     if converged or remaining_steps <= 0:
                         break
                     if len(neb.images) < max_num_frames:
-                        new_images = _expand_band(neb, fmax, max_num_frames, default_num_frames, calc)
-                        if new_images is not None:
+                        expand_result = _expand_band(neb, fmax, max_num_frames, default_num_frames, calc)
+                        if expand_result is not None:
+                            new_images, expand_gaps = expand_result
+                            new_frozen = _remap_indices(neb._frozen_set, expand_gaps)
+                            new_imin = _remap_indices(neb._imin_set, expand_gaps)
+                            new_frozen_cis = _remap_indices(
+                                neb._climbing_set & neb._frozen_set, expand_gaps)
                             neb = OCPNEB(
                                 new_images,
                                 batch_size=config_dict["ourNEB"]["batch_size"],
@@ -361,10 +372,13 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
                                 intermediate_minima=use_intermediate_minima,
                                 intermediate_minima_min_depth=config_dict["ourNEB"]["intermediate_minima_min_depth"],
                                 intermediate_minima_check_interval=config_dict["ourNEB"]["intermediate_minima_check_interval"],
+                                initial_imin_set=new_imin,
+                                frozen_images=new_frozen,
                                 freeze_fmax=fmax if not is_vasp else None,
                                 freeze_endpoint_fmax=endpoint_fmax if not is_vasp else None,
                                 **neb_kwargs,
                             )
+                            neb._climbing_set = new_frozen_cis
                             opt = Optimizer[1](neb, logfile=temp_log, trajectory=temp_traj,
                                               append_trajectory=True, **optimizer_kwargs)
                             print(f"Rank {rank}, structure {i}: added images, band now has {len(neb.images)} images", flush=True)
@@ -406,6 +420,7 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
                                 control_logfile=d_ctrl, logfile=d_log, trajectory=d_traj)
                             if dim_rlx.run(fmax=fmax, steps=dimer_refine_steps):
                                 neb.images[seg_ci].positions[:] = ci_atoms.positions
+                                neb._frozen_set.add(seg_ci)
                                 any_new_converged = True
                                 print(f"Rank {rank}, structure {i}: dimer converged CI {seg_ci}", flush=True)
                             else:
@@ -437,6 +452,7 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
                             ep_img.calc = SinglePointCalculator(ep_img, energy=e_ep, forces=f_ep)
                             neb.image_fmax[imin_idx] = float(np.sqrt((f_ep**2).sum(axis=1)).max())
                             if neb.image_fmax[imin_idx] < endpoint_fmax:
+                                neb._frozen_set.add(imin_idx)
                                 any_new_converged = True
                                 print(f"Rank {rank}, structure {i}: relaxed imin {imin_idx}", flush=True)
                         except Exception as e:
@@ -454,17 +470,19 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
                     t_traj = f'neb_refine_{i}{suffix}.traj'
                     temp_files.extend([t_log, t_traj])
 
-                    neb_kw_cont = dict(neb_kwargs, climb=False)
+                    prev_climbing = neb._climbing_set
                     neb = OCPNEB(
                         neb.images,
                         batch_size=config_dict["ourNEB"]["batch_size"],
                         dneb=config_dict["ourNEB"]["DNEB"],
-                        vasp=False, intermediate_minima=False,
+                        vasp=False,
+                        intermediate_minima=use_intermediate_minima,
                         initial_imin_set=neb._imin_set or None,
                         frozen_images=neb._frozen_set,
                         freeze_fmax=fmax, freeze_endpoint_fmax=endpoint_fmax,
-                        **neb_kw_cont,
+                        **neb_kwargs,
                     )
+                    neb._climbing_set = prev_climbing & neb._frozen_set
                     opt_cont = Optimizer[1](neb, logfile=t_log, trajectory=t_traj, **optimizer_kwargs)
                     opt_cont.run(fmax=fmax, steps=refine_band_steps)
                     print(f"Rank {rank}, structure {i}: continuation NEB done", flush=True)

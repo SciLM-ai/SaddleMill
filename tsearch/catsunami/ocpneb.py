@@ -105,7 +105,6 @@ class OCPNEB(BaseNEB):
         self.intermediate_minima_min_depth = abs(intermediate_minima_min_depth)
         self.intermediate_minima_check_interval = intermediate_minima_check_interval
         self._force_call_count = 0
-        self._check_imin_first_call = True if initial_imin_set is None else False
         self._imin_set = set(initial_imin_set) if initial_imin_set else set()
         self._imin_seeded = initial_imin_set is not None
         self._climbing_set = set()
@@ -247,10 +246,8 @@ class OCPNEB(BaseNEB):
 
         # Evaluate intermediate minima periodically (frozen between checks)
         should_check_imin = (self.intermediate_minima and
-                             (self._check_imin_first_call or
-                              self._force_call_count % self.intermediate_minima_check_interval == 0))
+                             self._force_call_count % self.intermediate_minima_check_interval == 0)
         if should_check_imin:
-            self._check_imin_first_call = False
             frozen_and_neighbors = set()
             for f in self._frozen_set:
                 frozen_and_neighbors.update([f - 1, f, f + 1])
