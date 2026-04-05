@@ -100,6 +100,33 @@ def _remap_indices(old_indices, expand_gaps):
             for old_idx in old_indices}
 
 
+def _relax_imin(neb, imin_indices, calc, optimizer_class, opt_kwargs,
+                target_fmax, freeze_fmax, max_steps, file_tag, temp_files, rank):
+    """Relax intermediate minima images and freeze those below freeze_fmax.
+
+    Returns set of newly frozen image indices.
+    """
+    newly_frozen = set()
+    for imin_idx in sorted(imin_indices):
+        neb.images[imin_idx].calc = calc
+        log_f = f'imin_relax_{file_tag}_img{imin_idx}.log'
+        traj_f = f'imin_relax_{file_tag}_img{imin_idx}.traj'
+        temp_files.extend([log_f, traj_f])
+        try:
+            opt = optimizer_class(neb.images[imin_idx], logfile=log_f, trajectory=traj_f, **opt_kwargs)
+            opt.run(target_fmax, max_steps)
+            imin_fmax = float(np.sqrt((neb.images[imin_idx].get_forces()**2).sum(axis=1)).max())
+            if imin_fmax < freeze_fmax:
+                neb._frozen_set.add(imin_idx)
+                newly_frozen.add(imin_idx)
+                print(f"Rank {rank}, structure {file_tag}: relaxed & froze imin {imin_idx} (fmax={imin_fmax:.4f})", flush=True)
+            else:
+                print(f"Rank {rank}, structure {file_tag}: relaxed imin {imin_idx} (fmax={imin_fmax:.4f}, not frozen)", flush=True)
+        except Exception as e:
+            print(f"Rank {rank}, structure {file_tag}: imin relax error {imin_idx}: {e}", flush=True)
+    return newly_frozen
+
+
 def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, executorlib_worker_id=None, **kwargs):
 
     rank = executorlib_worker_id
@@ -345,6 +372,24 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
 
             opt = Optimizer[1](neb, logfile=temp_log, trajectory=temp_traj, **optimizer_kwargs)
 
+            # Imin relaxation setup: shared between mid-NEB observer and post-NEB
+            imin_relax_opt_name = config_dict["ourNEB"]["endpoint_relax_Optimizer"] or config_dict["Main"]["Optimizer"]
+            imin_relax_kwargs = config_dict[imin_relax_opt_name]
+            imin_relax_steps = config_dict["ourNEB"]["endpoint_relax_steps"]
+
+            # Mid-NEB imin relaxation: attach observer that fires at each imin check
+            can_relax_imin = not is_vasp and use_intermediate_minima
+            if can_relax_imin:
+                imin_check_interval = config_dict["ourNEB"]["intermediate_minima_check_interval"]
+                def _relax_new_imin():
+                    to_relax = neb._imin_set - neb._frozen_set
+                    if to_relax:
+                        _relax_imin(neb, to_relax, calc, Optimizer[0], imin_relax_kwargs,
+                                    endpoint_fmax, fmax, imin_relax_steps,
+                                    f'mid_{i}{suffix}', temp_files, rank)
+                        neb.cached = False
+                opt.attach(_relax_new_imin, interval=imin_check_interval)
+
             # Optimization loop with optional image addition
             if can_add_images:
                 remaining_steps = total_steps
@@ -381,6 +426,8 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
                             neb._climbing_set = new_frozen_cis
                             opt = Optimizer[1](neb, logfile=temp_log, trajectory=temp_traj,
                                               append_trajectory=True, **optimizer_kwargs)
+                            if can_relax_imin:
+                                opt.attach(_relax_new_imin, interval=imin_check_interval)
                             print(f"Rank {rank}, structure {i}: added images, band now has {len(neb.images)} images", flush=True)
             else:
                 converged = opt.run(fmax=fmax, steps=total_steps)
@@ -435,32 +482,12 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
                 # Imin relaxation (only if refine_band_steps > 0 AND intermediate_minima)
                 refine_band_steps = config_dict["ourNEB"]["refine_band_steps"]
                 if refine_band_steps > 0 and use_intermediate_minima:
-                    ep_opt_name = config_dict["ourNEB"]["endpoint_relax_Optimizer"] or config_dict["Main"]["Optimizer"]
-                    ep_kwargs = config_dict[ep_opt_name]
-                    for imin_idx in sorted(neb._imin_set):
-                        if neb.image_fmax[imin_idx] < endpoint_fmax:
-                            continue
-                        ep_img = neb.images[imin_idx]
-                        ep_img.calc = calc
-                        ep_log = f'imin_relax_{i}{suffix}_img{imin_idx}.log'
-                        ep_traj_f = f'imin_relax_{i}{suffix}_img{imin_idx}.traj'
-                        temp_files.extend([ep_log, ep_traj_f])
-                        try:
-                            ep_opt = Optimizer[0](ep_img, logfile=ep_log, trajectory=ep_traj_f, **ep_kwargs)
-                            ep_opt.run(endpoint_fmax, config_dict["ourNEB"]["endpoint_relax_steps"])
-                            e_ep, f_ep = ep_img.get_potential_energy(), ep_img.get_forces()
-                            ep_img.calc = SinglePointCalculator(ep_img, energy=e_ep, forces=f_ep)
-                            neb.image_fmax[imin_idx] = float(np.sqrt((f_ep**2).sum(axis=1)).max())
-                            if neb.image_fmax[imin_idx] < endpoint_fmax:
-                                neb._frozen_set.add(imin_idx)
-                                any_new_converged = True
-                                print(f"Rank {rank}, structure {i}: relaxed imin {imin_idx}", flush=True)
-                        except Exception as e:
-                            print(f"Rank {rank}, structure {i}: imin relax error {imin_idx}: {e}", flush=True)
-
-                    # Restore fairchem calc on intermediates so OCPNEB batching
-                    # sees consistent AtomicData (SPC includes energy/forces
-                    # attributes that fairchem-calc images lack, breaking batching)
+                    newly_frozen = _relax_imin(
+                        neb, neb._imin_set - neb._frozen_set, calc, Optimizer[0],
+                        imin_relax_kwargs, endpoint_fmax, fmax, imin_relax_steps,
+                        f'{i}{suffix}', temp_files, rank)
+                    if newly_frozen:
+                        any_new_converged = True
                     for img in neb.images[1:-1]:
                         img.calc = calc
 

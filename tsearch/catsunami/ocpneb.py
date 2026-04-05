@@ -375,7 +375,7 @@ class OCPNEB(BaseNEB):
             seg_start, seg_end = boundaries[s], boundaries[s + 1]
 
             all_converged = all(
-                self.image_fmax[j] < (endpoint_fmax if (j in imin_set or j == 0 or j == self.nimages - 1) else fmax)
+                self.image_fmax[j] < (endpoint_fmax if (j == 0 or j == self.nimages - 1) else fmax)
                 for j in range(seg_start, seg_end + 1)
             )
             if all_converged:
@@ -386,7 +386,7 @@ class OCPNEB(BaseNEB):
                 for j in [seg_start, seg_end]:
                     if (j in imin_set and 0 < j < self.nimages - 1
                             and j not in self._frozen_set
-                            and self.image_fmax[j] < endpoint_fmax):
+                            and self.image_fmax[j] < fmax):
                         self._frozen_set.add(j)
                 seg_ci = _find_segment_ci(seg_start, seg_end, climbing_set, self.energies)
                 if (seg_ci is not None and seg_ci not in self._frozen_set

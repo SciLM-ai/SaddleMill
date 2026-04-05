@@ -75,6 +75,9 @@ def clean_up_files(config_dict):
             "reactant_relaxation_*.log", "reactant_relaxation_*.traj",
             "product_relaxation_*.log", "product_relaxation_*.traj",
             "diffusion_barrier_*.png",
+            "imin_relax_*.log", "imin_relax_*.traj",
+            "dimer_ci_*.log", "dimer_ci_*.traj",
+            "neb_refine_*.log", "neb_refine_*.traj",
         ],
         "Dimer": [
             "dimer_control_*.log", "dimer_opt_*.log", "dimer_*.traj",
