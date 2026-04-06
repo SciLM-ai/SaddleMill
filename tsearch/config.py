@@ -44,10 +44,9 @@ class ConfigManager:
             "max_num_frames": None,
             "batch_size": 4,
             "DNEB": False,
-            "intermediate_minima": False,
-            "intermediate_minima_check_interval": 100,
+            "intermediate_minima_check_step": 0,  # 0 = disabled; >0 = one-shot imin detection at this optimizer step
             "intermediate_minima_min_depth": 0.05,
-            "add_images_check_interval": 100,
+            "add_images_step": 0,  # 0 = disabled; >0 = one-shot image addition at this optimizer step
             "dimer_refine_ci": False,
             "dimer_refine_steps": 300,
             "refine_band_steps": 0,
@@ -94,6 +93,9 @@ class ConfigManager:
                 parsed_value = self._parse_value(value)
                 self._config[section][key] = parsed_value
 
+        # Migrate renamed config keys (backward compat)
+        self._migrate_renamed_keys()
+
         # Warn about unrecognized keys in sections we control
         for section, defaults in self.DEFAULTS.items():
             if section in self._config:
@@ -101,6 +103,33 @@ class ConfigManager:
                 for key in sorted(unknown):
                     print(f"Warning: Unrecognized key '{key}' in [{section}]. "
                           f"Valid keys: {sorted(defaults)}")
+
+    # Renamed keys: (section, old_key, new_key)
+    _RENAMED_KEYS = [
+        ("ourNEB", "intermediate_minima_check_interval", "intermediate_minima_check_step"),
+        ("ourNEB", "add_images_check_interval", "add_images_step"),
+    ]
+
+    def _migrate_renamed_keys(self):
+        """Silently migrate old config key names to new names."""
+        neb = self._config.get("ourNEB", {})
+
+        # Handle renamed keys
+        for section, old_key, new_key in self._RENAMED_KEYS:
+            sec = self._config.get(section, {})
+            if old_key in sec:
+                sec[new_key] = sec.pop(old_key)
+                print(f"Note: [{section}] '{old_key}' renamed to '{new_key}'.")
+
+        # Handle removed 'intermediate_minima' bool: if True, ensure check_step > 0
+        if "intermediate_minima" in neb:
+            enabled = neb.pop("intermediate_minima")
+            if enabled and neb.get("intermediate_minima_check_step", 0) == 0:
+                # User had intermediate_minima=True but no check_step set;
+                # use the old default (100) as the step
+                neb["intermediate_minima_check_step"] = 100
+                print("Note: [ourNEB] 'intermediate_minima=True' converted to "
+                      "'intermediate_minima_check_step=100'.")
 
     def _parse_value(self, val):
         """
@@ -320,21 +349,38 @@ def _categorize_status(status):
     return "errored"
 
 
-def _categorize_statuses(statuses):
-    """Return the set of categories present in a list of status strings."""
-    return {_categorize_status(s) for s in statuses}
+def _categorize_statuses(statuses, method_name=None):
+    """Return the set of categories for a job based on its status lines.
+
+    For NEB (band-level): 'converged' only if ALL sub-bands are converged/converged_CI.
+    For other methods: ANY matching status adds its category (original behavior).
+    """
+    cats_per_line = [_categorize_status(s) for s in statuses]
+    if method_name == "NEB":
+        # Band-level: converged only if ALL sub-bands converged
+        result = set()
+        if all(c == "converged" for c in cats_per_line):
+            result.add("converged")
+        if any(c == "not_converged" for c in cats_per_line):
+            result.add("not_converged")
+        if any(c == "errored" for c in cats_per_line):
+            result.add("errored")
+        return result
+    return set(cats_per_line)
 
 
 def get_remaining_trajes(trajes_and_idxs, config_dict):
     categories_to_run = _normalize_run_jobs(config_dict["Main"]["run_jobs"])
-    rows = read_status_csv_rows(config_dict["Main"]["method"])
+    method_name = config_dict["Main"]["method"]
+    rows = read_status_csv_rows(method_name)
 
     job_categories = {}
     for row in rows:
         job_id = int(row[0])
         status = row[-1].strip()
         job_categories.setdefault(job_id, []).append(status)
-    job_categories = {jid: _categorize_statuses(statuses) for jid, statuses in job_categories.items()}
+    job_categories = {jid: _categorize_statuses(statuses, method_name)
+                      for jid, statuses in job_categories.items()}
 
     remaining = []
     for idx, item in enumerate(trajes_and_idxs):
@@ -356,7 +402,7 @@ def build_redo_info(job_ids, config_dict):
 
     Returns {job_id: set of subunit_ids} where subunit_id is:
       - Dimer: attempt_id (int)
-      - NEB: sub_band_id (int)
+      - NEB: set of ALL sub_band_ids (NEB always re-runs full band)
       - DoubleMinimization: side_id (int, -1 or 1)
       - Minimization: None
     Only jobs with at least one matching status line are included.
@@ -367,8 +413,28 @@ def build_redo_info(job_ids, config_dict):
     rows = read_status_csv_rows(method_name)
 
     job_ids_set = set(job_ids)
-    redo_info = {}
 
+    if method_name == "NEB":
+        # NEB always re-runs full band: collect ALL sub-band ids for selected jobs
+        job_all_subbands = {}  # {job_id: set of all sub_band_ids}
+        job_statuses = {}      # {job_id: [status_strings]}
+        for row in rows:
+            jid = int(row[0])
+            if jid not in job_ids_set:
+                continue
+            subunit_id = int(row[subunit_col])
+            job_all_subbands.setdefault(jid, set()).add(subunit_id)
+            job_statuses.setdefault(jid, []).append(row[-1].strip())
+
+        redo_info = {}
+        for jid in job_all_subbands:
+            cats = _categorize_statuses(job_statuses[jid], method_name)
+            if cats & categories_to_run:
+                redo_info[jid] = job_all_subbands[jid]  # ALL sub-bands
+        return redo_info
+
+    # Other methods: per-subunit selection
+    redo_info = {}
     for row in rows:
         jid = int(row[0])
         if jid not in job_ids_set:
@@ -438,14 +504,18 @@ def archive_and_clean_csvs(config_dict, job_ids, categories_to_clean):
         for f in csv_files:
             zf.write(f, os.path.basename(f))
 
-    # 2. Clean: remove only rows whose status category matches categories_to_clean
+    # 2. Clean: remove rows matching categories_to_clean.
+    # NEB: remove ALL rows for selected jobs (always full-band re-run).
+    neb_clean_all = method_name == "NEB"
     cleaned = {}  # {job_id: set of subunit_ids}
     for f, rows in csv_data.items():
         kept = []
         for row in rows:
             jid = int(row[0])
             status = row[-1].strip()
-            if jid in job_ids_set and _categorize_status(status) in categories_to_clean:
+            should_clean = (jid in job_ids_set and
+                            (neb_clean_all or _categorize_status(status) in categories_to_clean))
+            if should_clean:
                 subunit_id = int(row[subunit_col]) if subunit_col is not None else None
                 cleaned.setdefault(jid, set()).add(subunit_id)
             else:

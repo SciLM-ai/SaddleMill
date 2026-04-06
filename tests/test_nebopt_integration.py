@@ -29,7 +29,7 @@ class TestNebopt:
         config["ourNEB"]["num_frames"] = 10
         config["ourNEB"]["batch_size"] = 4
         config["ourNEB"]["DNEB"] = False
-        config["ourNEB"]["intermediate_minima"] = False
+        config["ourNEB"]["intermediate_minima_check_step"] = 0
         config["ourNEB"]["dimer_refine_ci"] = False
         config["ourNEB"]["refine_band_steps"] = 0
         config["ourNEB"]["max_num_frames"] = None
@@ -193,11 +193,10 @@ class TestNebopt:
     # ----- Test: intermediate minima detection -----
 
     def test_neb_intermediate_minima(self, tmp_path, monkeypatch, fairchem_calc, neb_images):
-        """intermediate_minima=True, check_interval=1, 50 steps."""
+        """intermediate_minima_check_step=5, 50 steps."""
         self._setup_dirs(tmp_path, monkeypatch)
         config = self._make_config(
-            intermediate_minima=True,
-            intermediate_minima_check_interval=1,
+            intermediate_minima_check_step=5,
         )
         config["Main"]["steps"] = 50
         images = self._prepare_images(neb_images, fairchem_calc)

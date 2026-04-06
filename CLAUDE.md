@@ -50,21 +50,21 @@ catsunami/ocpneb.py  (OCPNEB: batched NEB with swDNEB switching)
 - Resume support: `get_remaining_trajes()` skips completed jobs
 
 ### `nebopt.py` - NEB Workflow
-1. **Continuation/sub-band check**: When `entries_to_run` is set, overrides starting images from `continuation_data`. All NEB settings always come from config.ini. `continue_from_result=True` uses extracted images directly; `False` re-interpolates sub-bands between endpoints or falls through to fresh run for full-band. Imin detection: enabled only on fresh full-band runs; full-band `continue_from_result=True` seeds imin from extracted `image_type` (frozen, no re-scanning); sub-band reruns disable imin. Image addition respects config but sub-band total capped at `num_frames`.
+1. **Continuation check**: When `entries_to_run` is set, overrides starting images from `continuation_data`. All NEB settings always come from config.ini. `continue_from_result=True` uses extracted images directly and seeds imin/frozen/frozen_fmax from previous result; config controls whether new imin/images are detected on top of seeded state. `False` falls through to fresh run. Always full-band (no sub-band reruns).
 2. **Endpoint relaxation** (optional): Relaxes reactant/product with configurable optimizer (e.g., LBFGS). For VaspInteractive, calculators finalized after relaxation and endpoints frozen with `SinglePointCalculator`.
 3. **Interpolation**: `ocp_idpp` (Meta's PBC-aware), `ase_idpp`, `ase_linear` (auto-falls back to IDPP on atom overlap), or `False` (use provided frames)
-4. **NEB optimization**: Uses `OCPNEB` with MDMin optimizer. Supports climbing image and intermediate minima (per-segment climbing). For VASP/VaspInteractive: per-image calculators in `VASP_{job_id}_{image_idx}/` dirs, separate `command`/`ncore` for endpoints vs intermediates, WAVECAR/CHG/CHGCAR cleanup after completion. VaspInteractive endpoint calculators finalized before `SinglePointCalculator` replacement; intermediate calculators finalized after NEB completes. Imin reclassification periodic (every `intermediate_minima_check_interval` steps) to prevent oscillation. Auto image addition: when `max_num_frames > num_frames`, periodically doubles images in unconverged segments (FAIRChem only). **Auto-freeze** (FAIRChem only, always on): OCPNEB checks for converged sub-bands/imin/CIs each step, adds to `_frozen_set`. Frozen images get zero NEB forces, are skipped in FAIRChem batching after first eval (cached), and act as segment boundaries. Only sub-bands (all below threshold), individual imin (below `endpoint_fmax`), and individual CIs (below `fmax`) can freeze — never regular images.
-5. **Post-NEB refinement** (optional, FAIRChem only): If band not fully converged: (a) `dimer_refine_ci=True`: quick ASE dimer on each unconverged CI, seeded with NEB tangent as eigenmode, using `[DimerControl]` config. (b) `refine_band_steps > 0` with `intermediate_minima=True`: relaxes unconverged imin to `endpoint_fmax`. (c) If `refine_band_steps > 0` and new extrema converged: continues NEB for `refine_band_steps` steps with `climb=False`, `intermediate_minima=False`, frozen set carrying over. Uses `_setup_dimer()` from `dimeropt.py` (shared helper).
-6. **Output**: Writes ALL band images as separate frames to output traj. Each image gets `src_index`, `image_idx`, `subband_idx`, `image_type` (endpoint/intermediate_minimum/climbing/regular), `effective_fmax`, `image_converged`, `band_converged`, `band_converged_CI`. CI images additionally get `eigenmode`, `barrier`, `dE`. Imin images duplicated so each sub-band is self-contained. Generates band plot PNG. Per-sub-band runs use temp files with `_sub{subband_idx}` suffix.
+4. **NEB optimization**: Uses `OCPNEB` with MDMin optimizer. Supports climbing image and intermediate minima (per-segment climbing). For VASP/VaspInteractive: per-image calculators in `VASP_{job_id}_{image_idx}/` dirs, separate `command`/`ncore` for endpoints vs intermediates, WAVECAR/CHG/CHGCAR cleanup after completion. VaspInteractive endpoint calculators finalized before `SinglePointCalculator` replacement; intermediate calculators finalized after NEB completes. **One-shot events**: `intermediate_minima_check_step` triggers imin detection at a specific step (one-shot, not periodic; 0 = disabled); `add_images_step` triggers image addition at a specific step (one-shot). **`_detect_imin()`**: Standalone function in nebopt.py. One-shot detection with exclusion based on existing imin +/-1 positions. Merges with existing imin_set. Auto image addition: when `max_num_frames > num_frames`, doubles images in unconverged segments at `add_images_step` (FAIRChem only). **Auto-freeze** (FAIRChem only, always on): OCPNEB checks for converged sub-bands/imin/CIs each step, adds to `_frozen_set`. Frozen images are skipped in FAIRChem batching after first eval (cached), report cached NEB-modified fmax (not 0), and act as segment boundaries. Only sub-bands (all below threshold), individual imin (below `endpoint_fmax`), and individual CIs (below `fmax`) can freeze — never regular images.
+5. **Post-NEB refinement** (optional, FAIRChem only): If band not fully converged: (a) `dimer_refine_ci=True`: quick ASE dimer on each unconverged CI, seeded with NEB tangent as eigenmode, using `[DimerControl]` config. Updates CI position in the band, then calls `neb.get_forces()` to obtain proper NEB fmax, and freezes with cached NEB fmax. (b) `refine_band_steps > 0`: always runs if band not converged. Reuses the SAME NEB object with a new optimizer — all imin/CI/frozen state preserved (no separate OCPNEB instance). Uses `_setup_dimer()` from `dimeropt.py` (shared helper).
+6. **Output**: Writes ALL band images as separate frames to output traj. Each image gets `src_index`, `image_idx`, `subband_idx`, `image_type` (endpoint/intermediate_minimum/climbing/regular), `effective_fmax`, `image_converged`, `band_converged`, `band_converged_CI`. CI images additionally get `eigenmode`, `barrier`, `dE`. Imin images duplicated so each sub-band is self-contained. Generates band plot PNG. Result extraction uses the same NEB object's state directly (no state loss).
 
 ### `catsunami/ocpneb.py` - Core NEB Engine
 - **`OCPNEB`** (extends BaseNEB): Two modes controlled by `vasp` flag:
   - **FAIRChem mode** (`vasp=False`): Batch-evaluates intermediate images via FAIRChemCalculator. Caches forces between calls. fairchem imports are lazy.
-  - **VASP mode** (`vasp=True`): Delegates to parent `BaseNEB` for per-image force evaluation. Each image has its own VASP calculator. No batching/caching/fairchem dependency. When `intermediate_minima=True` or `initial_imin_set` provided, bypasses `BaseNEB.get_forces()` and evaluates individually to route through custom `get_precon_forces()`.
+  - **VASP mode** (`vasp=True`): Delegates to parent `BaseNEB` for per-image force evaluation. Each image has its own VASP calculator. No batching/caching/fairchem dependency. When `initial_imin_set` or `frozen_images` provided, bypasses `BaseNEB.get_forces()` and evaluates individually to route through custom `get_precon_forces()`.
   - Both modes: Handles constraints (fixed atoms by tag=0 or explicit). Stores full `real_forces` array `(nimages, natoms, 3)` including endpoints for uniform access via `real_forces[imax]`.
-- **Intermediate minima support**: `get_precon_forces()` periodically (every `intermediate_minima_check_interval` force calls) scans images 2 through `nimages-3` for local energy minima (energy lower than both neighbors by ≥ `intermediate_minima_min_depth`). Between checks, classification is frozen. Detected minima receive pure PES forces (no spring/tangent projection) to relax into the basin. Band splits into segments at minima; each segment gets its own climbing image (highest-energy interior, recomputed every step). `imax` = global highest-energy CI. Images 1 and `nimages-2` excluded from detection to ensure room for CIs. `initial_imin_set` can seed known positions (for full-band `continue_from_result=True`); seeded set is frozen (no re-scanning), same PES force treatment.
-- **Frozen images**: `frozen_images` constructor param provides initial set; `freeze_fmax`/`freeze_endpoint_fmax` enable auto-freeze via `_auto_freeze()`. Frozen images: (1) zero NEB forces, (2) skipped in FAIRChem batching after first eval (cached in `_frozen_energies`/`_frozen_pbc_forces`), (3) excluded from imin detection (with neighbors), (4) segment boundaries for CI selection. Only converged sub-bands, individual converged imin, and individual converged CIs can freeze — never regular images. `_auto_freeze()` runs after fmax computation; new freezes take effect next force call.
-- **Per-image effective fmax**: After NEB force modifications in `get_precon_forces()`, computes `max|F|` per image (regular: NEB-modified; climbing: PES + doubled reversed tangential; imin: pure PES; frozen: 0.0). Stored in `self.image_fmax` and `image.info['effective_fmax']`.
+- **Intermediate minima support**: OCPNEB no longer detects intermediate minima internally — imin_set is externally managed by nebopt.py (via `_detect_imin()`). `initial_imin_set` seeds known positions. Detected minima receive pure PES forces (no spring/tangent projection) to relax into the basin. Band splits into segments at minima; each segment gets its own climbing image (highest-energy interior, recomputed every step). `imax` = global highest-energy CI.
+- **Frozen images**: `frozen_images` constructor param provides initial set; `frozen_fmax` constructor param (dict: img_idx -> cached NEB fmax) provides initial fmax cache; `freeze_fmax`/`freeze_endpoint_fmax` enable auto-freeze via `_auto_freeze()`. Frozen images: (1) report cached NEB-modified fmax (not 0), (2) skipped in FAIRChem batching after first eval (cached in `_frozen_energies`/`_frozen_pbc_forces`), (3) segment boundaries for CI selection. Imin detection exclusion zone is based on existing imin +/-1 (NOT frozen set) — new imin can be next to frozen CIs but not other imin. Only converged sub-bands, individual converged imin, and individual converged CIs can freeze — never regular images. `_auto_freeze()` runs after fmax computation; caches NEB fmax for newly frozen images in `_frozen_fmax_cache`; new freezes take effect next force call.
+- **Per-image effective fmax**: After NEB force modifications in `get_precon_forces()`, computes `max|F|` per image (regular: NEB-modified; climbing: PES + doubled reversed tangential; imin: pure PES; frozen: cached NEB fmax from freeze time). Stored in `self.image_fmax` and `image.info['effective_fmax']`.
 - **`swDNEB`** (NEBMethod subclass): Switched Doubly Nudged Elastic Band (works with FAIRChem and VASP):
   - Improved tangent vectors (energy-weighted at extrema)
   - Perpendicular spring force to straighten band
@@ -212,14 +212,13 @@ interpolate_method = ase_linear    # ocp_idpp | ase_idpp | ase_linear | False
 num_frames = 10
 batch_size = 8                     # FAIRChem only
 DNEB = True
-intermediate_minima = True
-intermediate_minima_check_interval = 100
+intermediate_minima_check_step = 1600  # 0 = disabled; >0 = one-shot imin detection at this optimizer step
 intermediate_minima_min_depth = 0.05
-max_num_frames = 80                # Enables auto image addition if > num_frames (FAIRChem only)
-add_images_check_interval = 100
+max_num_frames = 80                # Enables one-shot image addition if > num_frames (FAIRChem only)
+add_images_step = 0                # 0 = disabled; >0 = one-shot image addition at this optimizer step
 dimer_refine_ci = False            # Post-NEB dimer on unconverged CIs (FAIRChem only)
 dimer_refine_steps = 300
-refine_band_steps = 0              # Continuation NEB after extrema refinement; also relaxes imin when > 0
+refine_band_steps = 0              # Continue NEB with same object if not converged; reuses all imin/CI/frozen state
 # VASP-only (required when Calculator = Vasp or VaspInteractive):
 vasp_command_endpoints = "srun --exclusive -n 64 vasp_std"
 vasp_ncore_endpoints = 8
@@ -263,7 +262,7 @@ relax_cell = False
 | `errored` | `error`, `error: <message>` |
 | `remaining` | No CSV row for this job_id |
 
-**Per-line selection**: A job is included if ANY of its CSV lines match requested categories. Only matching attempts/sub-bands/sides are redone; the rest stay in active output.
+**Per-line selection**: A job is included if ANY of its CSV lines match requested categories. Only matching attempts/sides are redone; the rest stay in active output. **NEB exception**: categorization is at band level — "converged" only if ALL sub-bands have converged/converged_CI status. When a NEB job is selected, the entire band is re-run (no partial sub-band reruns).
 
 **Examples:**
 ```ini
@@ -277,8 +276,8 @@ run_jobs = all                        # Redo everything
 
 **Archiving on resume**: Full backup, per-entry cleaning:
 - **CSVs**: Archived as `{method}_status_csvs/previous_{N}.zip`. Only matching lines removed.
-- **Output trajs**: Archived as `{method}_trajes/previous_{N}.zip`. Frames removed by `attempt_id` (Dimer), `subband_idx` (NEB), `src_index` (Minimization). DoubleMinimization removes all 3 frames (min1+TS+min2) together since they share reaction check metadata.
-- **Debug zips**: Archived as `{method}_debug_zips/previous_{N}.zip`. Per-entry cleaning by subunit info in filenames (Dimer: `attempt_id`, DoubleMinimization: `-0`/`-1` suffix, NEB sub-band: `_sub{idx}` suffix). NEB full-band debug files removed whole when any sub-band is redone.
+- **Output trajs**: Archived as `{method}_trajes/previous_{N}.zip`. Frames removed by `attempt_id` (Dimer), `src_index` (NEB removes all band images, Minimization). DoubleMinimization removes all 3 frames (min1+TS+min2) together since they share reaction check metadata.
+- **Debug zips**: Archived as `{method}_debug_zips/previous_{N}.zip`. Per-entry cleaning by subunit info in filenames (Dimer: `attempt_id`, DoubleMinimization: `-0`/`-1` suffix). NEB debug files removed whole when the band is redone.
 
 Jobs with no prior entries don't trigger archiving.
 
@@ -287,14 +286,14 @@ Jobs with no prior entries don't trigger archiving.
 When re-running previously completed entries, the system extracts previous results from output trajs. `continue_from_result` controls usage:
 
 - `True` (default): continue from extracted structure.
-- `False`: start fresh (Dimer: fresh attempts at same positions; NEB partial: re-interpolate; NEB all: original input; DoubleMinimization: re-displace from TS).
+- `False`: start fresh (Dimer: fresh attempts at same positions; NEB: original input; DoubleMinimization: re-displace from TS).
 
 Errored entries always fall back to fresh. Continuation handled per-entry inside method functions; fresh and continuation jobs coexist in same batch.
 
 | Method | Granularity | `True` | `False` |
 |---|---|---|---|
 | Dimer | per-attempt | Continue from extracted structure with eigenmode | Fresh attempt at same `attempt_id` (same type, new displacement) |
-| NEB | per-sub-band | Continue from extracted images. Full-band: seed imin from `image_type`. | Partial: re-interpolate. All sub-bands: original input. |
+| NEB | full-band | Continue from extracted images. Seeds imin/frozen/frozen_fmax from previous result. Config controls new imin/image detection on top of seeded state. | Fresh run from original input. |
 | DoubleMinimization | per-side | Continue not-converged side | Re-displace from TS |
 | Minimization | per-job | Continue from extracted structure | Original input |
 
@@ -321,7 +320,7 @@ NEB_trajes/collected_ts_rank_*.traj  # All band images with metadata in atoms.in
 NEB_debug_zips/                      # Compressed log/traj/plot files
 ```
 
-NEB output image metadata: `src_index`, `image_idx`, `subband_idx`, `image_type` (endpoint/intermediate_minimum/climbing/regular), `effective_fmax`, `image_converged`, `band_converged`, `band_converged_CI`, `nimages`, `interpolation_method`, `orig_info`. CI images also get `eigenmode`, `barrier`, `dE`. Imin images duplicated for sub-band self-containment. Per-sub-band redo temp files use `_sub{subband_idx}` suffix.
+NEB output image metadata: `src_index`, `image_idx`, `subband_idx`, `image_type` (endpoint/intermediate_minimum/climbing/regular), `effective_fmax`, `image_converged`, `band_converged`, `band_converged_CI`, `nimages`, `interpolation_method`, `orig_info`. CI images also get `eigenmode`, `barrier`, `dE`. Imin images duplicated for sub-band self-containment. NEB CSV is still per-sub-band lines; band-level run_jobs categorization requires ALL sub-bands converged/converged_CI.
 
 Dimer output: `eigenmode`, `curvature`, `converged`, `src_index`, `attempt_id`, `stoprun`, `selected_index`, `reaction_type`, `orig_info`.
 

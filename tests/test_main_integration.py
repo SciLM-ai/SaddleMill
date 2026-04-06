@@ -109,7 +109,7 @@ interpolate_method = False
 num_frames = 10
 batch_size = 4
 DNEB = False
-intermediate_minima = False
+intermediate_minima_check_step = 0
 
 [BaseNEB]
 k = 5
@@ -273,7 +273,7 @@ interpolate_method = False
 num_frames = 10
 batch_size = 4
 DNEB = False
-intermediate_minima = False
+intermediate_minima_check_step = 0
 
 [BaseNEB]
 k = 5
@@ -318,7 +318,7 @@ interpolate_method = False
 num_frames = 10
 batch_size = 4
 DNEB = False
-intermediate_minima = False
+intermediate_minima_check_step = 0
 
 [BaseNEB]
 k = 5

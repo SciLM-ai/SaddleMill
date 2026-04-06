@@ -80,11 +80,9 @@ class OCPNEB(BaseNEB):
         batch_size=8,
         dneb=False,
         vasp=False,
-        intermediate_minima=False,
-        intermediate_minima_min_depth=0.05,
-        intermediate_minima_check_interval=100,
         initial_imin_set=None,
         frozen_images=None,
+        frozen_fmax=None,
         freeze_fmax=None,
         freeze_endpoint_fmax=None,
     ):
@@ -101,15 +99,11 @@ class OCPNEB(BaseNEB):
         )
         if dneb: self.neb_method = swDNEB(self)
         self.vasp = vasp
-        self.intermediate_minima = intermediate_minima
-        self.intermediate_minima_min_depth = abs(intermediate_minima_min_depth)
-        self.intermediate_minima_check_interval = intermediate_minima_check_interval
-        self._force_call_count = 0
         self._imin_set = set(initial_imin_set) if initial_imin_set else set()
-        self._imin_seeded = initial_imin_set is not None
         self._climbing_set = set()
         self.image_fmax = np.zeros(self.nimages)
         self._frozen_set = set(frozen_images) if frozen_images else set()
+        self._frozen_fmax_cache = dict(frozen_fmax) if frozen_fmax else {}
         self._freeze_fmax = freeze_fmax
         self._freeze_endpoint_fmax = freeze_endpoint_fmax
 
@@ -138,7 +132,7 @@ class OCPNEB(BaseNEB):
 
 
     def get_forces(self):
-        if self.vasp and not self.intermediate_minima and not self._imin_set and not self._frozen_set:
+        if self.vasp and not self._imin_set and not self._frozen_set:
             return super().get_forces()
         elif self.vasp:
             # VASP + intermediate_minima: per-image evaluation + custom NEB forces
@@ -242,25 +236,6 @@ class OCPNEB(BaseNEB):
         self.real_forces[-1] = self.product_forces
 
         state = NEBState(self, images, energies)
-        self._force_call_count += 1
-
-        # Evaluate intermediate minima periodically (frozen between checks)
-        should_check_imin = (self.intermediate_minima and
-                             self._force_call_count % self.intermediate_minima_check_interval == 0)
-        if should_check_imin:
-            frozen_and_neighbors = set()
-            for f in self._frozen_set:
-                frozen_and_neighbors.update([f - 1, f, f + 1])
-            imin_set = set()
-            for i in range(2, self.nimages - 2):  # exclude endpoint-adjacent images to ensure each segment has room for a CI
-                if (i not in frozen_and_neighbors and
-                        energies[i] < energies[i - 1] - self.intermediate_minima_min_depth and
-                        energies[i] < energies[i + 1] - self.intermediate_minima_min_depth):
-                    imin_set.add(i)
-            self._imin_set = imin_set
-        elif not self.intermediate_minima and not self._imin_seeded:
-            self._imin_set = set()
-        # else: reuse frozen self._imin_set from last check (or seeded set)
 
         imin_set = self._imin_set
 
@@ -334,8 +309,12 @@ class OCPNEB(BaseNEB):
 
         # Compute per-image effective fmax (max force magnitude across atoms)
         for img_i in range(1, self.nimages - 1):
-            effective_force = precon_forces[img_i - 1]  # (natoms, 3), already modified in-place
-            self.image_fmax[img_i] = float(np.sqrt((effective_force**2).sum(axis=1)).max())
+            if img_i in self._frozen_set:
+                # Frozen images report their cached NEB fmax from when they were last active
+                self.image_fmax[img_i] = self._frozen_fmax_cache.get(img_i, 0.0)
+            else:
+                effective_force = precon_forces[img_i - 1]  # (natoms, 3), already modified in-place
+                self.image_fmax[img_i] = float(np.sqrt((effective_force**2).sum(axis=1)).max())
             images[img_i].info['effective_fmax'] = self.image_fmax[img_i]
         # Endpoints: PES force only
         self.image_fmax[0] = float(np.sqrt((self.real_forces[0]**2).sum(axis=1)).max())
@@ -351,8 +330,9 @@ class OCPNEB(BaseNEB):
         if self._freeze_fmax is not None:
             prev_frozen = set(self._frozen_set)
             self._auto_freeze()
-            # Cache energy/forces for newly frozen images so they skip batching next step
+            # Cache NEB fmax and PES energy/forces for newly frozen images
             for abs_idx in self._frozen_set - prev_frozen:
+                self._frozen_fmax_cache[abs_idx] = self.image_fmax[abs_idx]
                 if abs_idx not in self._frozen_energies:
                     self._frozen_energies[abs_idx] = energies[abs_idx]
                     self._frozen_pbc_forces[abs_idx] = self.real_forces[abs_idx].copy()

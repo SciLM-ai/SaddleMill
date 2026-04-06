@@ -238,14 +238,21 @@ class TestOCPNEBForces:
 class TestOCPNEBFrozenImages:
     """Test frozen image handling."""
 
-    def test_frozen_image_gets_zero_fmax(self, fairchem_calc, neb_images):
+    def test_frozen_image_reports_cached_fmax(self, fairchem_calc, neb_images):
         from tsearch.catsunami.ocpneb import OCPNEB
         images = [img.copy() for img in neb_images]
         for img in images:
             img.calc = fairchem_calc
-        neb = OCPNEB(images, batch_size=4, climb=True, frozen_images={3})
-        neb.get_forces()
-        assert neb.image_fmax[3] == 0.0
+        # Constructor-frozen with explicit cached fmax
+        neb = OCPNEB(images, batch_size=4, climb=True,
+                      frozen_images={3}, frozen_fmax={3: 0.02})
+        forces = neb.get_forces()
+        # Should report cached NEB fmax, not 0
+        assert neb.image_fmax[3] == 0.02
+        # But optimizer forces should be zeroed for frozen images
+        n = neb.natoms
+        frozen_forces = forces.reshape(-1, n, 3)[2]  # image 3 is index 2 in intermediate forces
+        assert np.allclose(frozen_forces, 0.0)
 
     def test_frozen_image_excluded_from_climbing(self, fairchem_calc, neb_images):
         from tsearch.catsunami.ocpneb import OCPNEB
