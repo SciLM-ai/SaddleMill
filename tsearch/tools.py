@@ -106,6 +106,7 @@ def clean_up_files(config_dict):
         ],
         "DoubleMinimization": [
             "optimization_*.log", "optimization_*.traj",
+            "dimer_refine_*.log",
         ],
     }
 

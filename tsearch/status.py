@@ -9,6 +9,7 @@ If directory is not specified, uses the current working directory.
 import os
 import sys
 import json
+from itertools import groupby
 
 from .config import ConfigManager, _categorize_status, read_status_csv_rows
 
@@ -22,14 +23,40 @@ def _read_config(directory):
     return ConfigManager(config_path)
 
 
-def _get_total_jobs(directory):
-    """Get total job count from traj_files_ordered.json."""
+def _get_total_jobs(directory, config):
+    """Get job count from traj_files_ordered.json, post input_statuses filter.
+
+    When ``input_statuses`` is narrower than ``all``, frames whose stored
+    status does not match are silently skipped at submission time and will
+    never produce CSV rows under the current filter. This function mirrors
+    that filter so ``Total``/``Remaining`` reflect only eligible jobs.
+    """
     json_path = os.path.join(directory, "traj_files_ordered.json")
     if not os.path.exists(json_path):
         return None
     with open(json_path) as f:
         data = json.load(f)
-    return len(data)
+
+    raw = config["Main"]["input_statuses"]
+    if raw in ("all", None):
+        return len(data)
+
+    # Apply the same filter as __main__.py to count eligible input frames.
+    from ase.io import Trajectory
+    from .tools import load_and_sanitize, passes_input_filter
+
+    count = 0
+    for traj_name, group in groupby(data, key=lambda x: x[0]):
+        traj_path = traj_name if os.path.isabs(traj_name) \
+            else os.path.join(directory, traj_name)
+        if not os.path.exists(traj_path):
+            continue
+        with Trajectory(traj_path, 'r') as traj:
+            for _, i, j in group:
+                images = load_and_sanitize(traj, i, j)
+                if passes_input_filter(images, config):
+                    count += 1
+    return count
 
 
 def _compute_expected_entries_per_job(method_name, config):
@@ -184,7 +211,7 @@ def main():
 
     config = _read_config(directory)
     method = config.get_value("Main", "method")
-    total_jobs = _get_total_jobs(directory)
+    total_jobs = _get_total_jobs(directory, config)
     rows = read_status_csv_rows(method, directory)
     entries_per_job = _compute_expected_entries_per_job(method, config)
 
@@ -213,11 +240,14 @@ def main():
 
     # --- Job-level ---
     print(f"  Jobs (structures):")
-    if total_jobs is not None:
-        jobs_remaining = total_jobs - jobs_started
+    if total_jobs is not None and total_jobs > 0:
+        jobs_remaining = max(0, total_jobs - jobs_started)
         print(f"    Total:       {total_jobs:>6}")
         print(f"    Started:     {jobs_started:>6}  ({100*jobs_started/total_jobs:5.1f}%)")
         print(f"    Remaining:   {jobs_remaining:>6}  ({100*jobs_remaining/total_jobs:5.1f}%)")
+    elif total_jobs == 0:
+        print(f"    Total:       {total_jobs:>6}  (no input frames match input_statuses)")
+        print(f"    Started:     {jobs_started:>6}")
     else:
         print(f"    Started:     {jobs_started:>6}")
         print(f"    (no traj_files_ordered.json - cannot determine remaining)")

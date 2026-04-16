@@ -32,6 +32,7 @@ class ConfigManager:
         },
         "ourDoubleMinimization": {
             "relax_cell": False,
+            "pre_dimer_refine": False,
         },
         "ourNEB": {
             "only_endpoints_in_input_traj": False,
@@ -549,7 +550,10 @@ def _get_debug_filename_patterns(method_name):
     elif method_name == "Dimer":
         return [re.compile(r'^(?:ERROR_)?dimer_(?:control_|opt_)?(\d+)_(\d+)_')]
     elif method_name == "DoubleMinimization":
-        return [re.compile(r'^(?:ERROR_)?optimization_(\d+)_(-?\d+)')]
+        return [
+            re.compile(r'^(?:ERROR_)?optimization_(\d+)_(-?\d+)'),
+            re.compile(r'^(?:ERROR_)?dimer_refine_(\d+)'),
+        ]
     elif method_name == "Minimization":
         return [re.compile(r'^(?:ERROR_)?optimization_(\d+)')]
     return []

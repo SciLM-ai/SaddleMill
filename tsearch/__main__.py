@@ -92,6 +92,7 @@ def main():
         submitter = get_submitter(exe)
         futures = []
         idx = 0
+        submitted = 0
 
         for traj_name, group in groupby(trajes_and_idxs, key=lambda x: x[0]):
             traj = Trajectory(traj_name, 'r')
@@ -106,6 +107,7 @@ def main():
                                   continuation_data=previous_results.get(job_id),
                                   entries_to_run=redo_info.get(job_id))
                     if config_dict["Main"]["executorlib"]: futures.append(f)
+                    submitted += 1
                 except Exception as e:
                     print(f"CRITICAL ERROR on job {idx} ({traj_name}): {e}")
                     # In serial mode, we catch it and move on.
@@ -113,9 +115,12 @@ def main():
                 idx += 1
             traj.close()
 
+        print(f"Scanned {idx} input frame(s); submitted {submitted} "
+              f"(skipped {idx - submitted} by input_statuses).", flush=True)
+
         if config_dict["Main"]["executorlib"]:
             while len(futures):
-                futures = check_and_print_status(futures, idx)
+                futures = check_and_print_status(futures, submitted)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,27 @@ def _setup_dimer(atoms, calc, eigenmode=None, displacement_dict=None,
     return d_atoms, dim_rlx
 
 
+def _refine_eigenmode(atoms, calc, eigenmode, dimer_control_kwargs=None,
+                      control_logfile=None):
+    """Refine eigenmode via dimer rotation only (no translation).
+
+    Works on a copy of *atoms* — the original is never modified.
+    Returns (refined_eigenmode, curvature).
+    """
+    refine_atoms = atoms.copy()
+    refine_atoms.calc = calc
+    d_control = DimerControl(logfile=control_logfile,
+                             **(dimer_control_kwargs or {}))
+    d_atoms = MinModeAtoms(refine_atoms, d_control,
+                           eigenmodes=[np.array(eigenmode)])
+    d_atoms.displace(displacement_vector=np.random.randn(len(refine_atoms), 3) * 1e-10,
+                     method='vector')
+    # get_forces() triggers eigenmode rotation (up to max_num_rot iterations).
+    # No translation — only the eigenmode direction and curvature are updated.
+    d_atoms.get_forces()
+    return d_atoms.get_eigenmode(), float(d_atoms.get_curvature())
+
+
 def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executorlib_worker_id=None, **kwargs):
 
     rank = executorlib_worker_id

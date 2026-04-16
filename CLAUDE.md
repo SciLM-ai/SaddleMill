@@ -73,6 +73,7 @@ catsunami/ocpneb.py  (OCPNEB: batched NEB with swDNEB switching)
 
 ### `dimeropt.py` - Dimer Method
 - **`_setup_dimer()`**: Shared helper creating `MinModeAtoms` + `MinModeTranslate` from ASE's dimer API. Used by `dimeropt()` and `nebopt()` (CI refinement). Returns `(d_atoms, dim_rlx)` without running.
+- **`_refine_eigenmode()`**: Rotation-only dimer helper. Creates `MinModeAtoms` on a copy of atoms, triggers eigenmode rotation via `get_forces()`, returns `(refined_eigenmode, curvature)` without translating. Used by `doublegeomopt()` for optional pre-displacement eigenmode refinement.
 - Generates displacement candidates via `dimertools/structure_edit.py`
 - Supports `bulk` and `oc` modes, both using `reaction_types` + `num_attempts_per_type` config.
 - Convergence checks every 5 steps: participation ratio (delocalization) and desorption detection
@@ -129,7 +130,7 @@ Adsorbate atoms: tag=2 (fallback tag=1). Substrate (tag=0) fixed via `FixAtoms`.
 
 ### `geomopt.py` - Geometry Optimization
 - `geomopt()`: Standard relaxation with optional cell relaxation (FrechetCellFilter)
-- `doublegeomopt()`: Takes converged TS with eigenmode, displaces ±0.25*eigenmode, relaxes both directions, detects bond breaking/forming via `check_reaction()`. Reads `eigenmode`, `converged`, `src_index` from `atoms.info['orig_info']` (fallback `atoms.info`). Each frame gets `side` in `.info` (-1=min1, 0=ts, 1=min2). Writes 2 CSV lines per job. Accepts `entries_to_run`/`continuation_data` for per-side execution.
+- `doublegeomopt()`: Takes converged TS with eigenmode, displaces ±0.25*eigenmode, relaxes both directions, detects bond breaking/forming via `check_reaction()`. Reads `eigenmode`, `converged`, `src_index` from `atoms.info['orig_info']` (fallback `atoms.info`). Each frame gets `side` in `.info` (-1=min1, 0=ts, 1=min2). Writes 2 CSV lines per job. Accepts `entries_to_run`/`continuation_data` for per-side execution. Optional `pre_dimer_refine=True` (default False) runs a rotation-only dimer step via `_refine_eigenmode()` from `dimeropt.py` to refine the eigenmode direction before displacement. Rotation parameters controlled by `[DimerControl]` section (especially `max_num_rot`, `dimer_separation`). Stores refined eigenmode and curvature on the TS output frame's `.info`.
 
 ### `tools.py` - Utilities
 - `load_and_sanitize(traj, i, j)`: Loads atoms and stashes original `.info` into `atoms.info = {"orig_info": <original_info>}`. Prevents per-atom array data from causing size mismatches on atom add/remove. Called in `__main__.py` for all methods.
@@ -248,6 +249,7 @@ relax_cell = False
 
 [ourDoubleMinimization]
 relax_cell = False
+pre_dimer_refine = False   # Rotation-only dimer to refine eigenmode before displacement (requires [DimerControl])
 ```
 
 ### `run_jobs` — Flexible Job Selection

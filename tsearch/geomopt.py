@@ -6,6 +6,7 @@ from ase.io import Trajectory
 from ase.filters import FrechetCellFilter
 from ase.calculators.singlepoint import SinglePointCalculator
 from tsearch.tools import check_reaction, check_adsorbate_reaction, backup_flux_logs
+from tsearch.dimeropt import _refine_eigenmode
 
 
 def relax_structure(config_dict, optimizable, logfile, trajfile, Optimizer):
@@ -128,6 +129,18 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
 
             # Identify IDs
             refined_eigenmode = orig['eigenmode']
+
+            # --- OPTIONAL: Refine eigenmode via dimer rotation ---
+            curvature = orig.get('curvature')
+            if config_dict['ourDoubleMinimization']['pre_dimer_refine']:
+                dimer_log = f'dimer_refine_{i}.log'
+                temp_files.append(dimer_log)
+                refined_eigenmode, curvature = _refine_eigenmode(
+                    atoms, calc, refined_eigenmode,
+                    dimer_control_kwargs=config_dict.get("DimerControl", {}),
+                    control_logfile=dimer_log,
+                )
+
             continue_from_result = config_dict["Main"]["continue_from_result"]
 
             # --- PREPARE TS (Middle Image) ---
@@ -216,6 +229,9 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                 obj.info.update(reaction_info)
             ts_atoms.info['side'] = 0
             ts_atoms.info['src_index'] = i
+            ts_atoms.info['eigenmode'] = refined_eigenmode
+            if curvature is not None:
+                ts_atoms.info['curvature'] = curvature
 
             # --- WRITE FRAMES (Min1, TS, Min2) ---
             side_statuses = {}
