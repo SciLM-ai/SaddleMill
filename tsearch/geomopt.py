@@ -59,15 +59,11 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
             else:
                 status = "not_converged"
                 atoms.info['converged'] = 0
-            log_status(status)
             atoms.info['status'] = status
             atoms.info['src_index'] = i
             atoms.wrap()
 
             writer.write(atoms)
-
-            if consecutive_errors is not None:
-                consecutive_errors[0] = 0
 
             # Clean up temp files
             existing_files = [f for f in temp_files if os.path.exists(f)]
@@ -77,6 +73,10 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
                         zf.write(f_name, arcname=f"{f_name}")
                 for f_name in existing_files:
                     os.remove(f_name)
+
+            log_status(status)
+            if consecutive_errors is not None:
+                consecutive_errors[0] = 0
 
         except Exception as e:
             print(f"Rank {rank} FAILED on structure {i}: {e}", flush=True)
@@ -250,13 +250,6 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
             writer.write(ts_atoms)
             writer.write(min2)
 
-            for side in mins:
-                if entries_to_run is None or side in entries_to_run:
-                    log_status(side, parent_source_idx, side_statuses[side])
-
-            if consecutive_errors is not None:
-                consecutive_errors[0] = 0
-
             # --- CLEANUP (Success Case) ---
             existing_files = [f for f in temp_files if os.path.exists(f)]
             if existing_files and config_dict['Main']['zip']:
@@ -265,6 +258,13 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                         zf.write(f_name, arcname=f_name)
                 for f_name in existing_files:
                     os.remove(f_name)
+
+            for side in mins:
+                if entries_to_run is None or side in entries_to_run:
+                    log_status(side, parent_source_idx, side_statuses[side])
+
+            if consecutive_errors is not None:
+                consecutive_errors[0] = 0
 
         except Exception as e:
             # --- CLEANUP (Error Case) ---
