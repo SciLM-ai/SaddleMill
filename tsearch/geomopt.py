@@ -48,6 +48,8 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
         temp_opt_log = f'optimization_{i}.log'
         temp_traj = f'optimization_{i}.traj'
         temp_files = [temp_opt_log, temp_traj]
+        orig = atoms.info.get('orig_info', {})
+        parent_source_idx = orig.get('src_index')
 
         try:
             optimizable = FrechetCellFilter(atoms) if config_dict['our'+method_name]['relax_cell'] else atoms
@@ -62,6 +64,7 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
                 atoms.info['converged'] = 0
             atoms.info['status'] = status
             atoms.info['task_name'] = task_name
+            atoms.info['parent_ts_index'] = parent_source_idx
             atoms.info['src_index'] = i
             atoms.wrap()
 
@@ -123,7 +126,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
     entries_to_run = kwargs.get('entries_to_run')        # set of side_ids (-1, 1) or None
     with Trajectory(my_output_file, 'a') as writer:
         orig = atoms.info.get('orig_info', {})
-        parent_source_idx = orig['src_index']
+        parent_source_idx = orig.get('src_index')
         try:
             if 'eigenmode' not in orig:
                 raise Exception("Input structure missing 'eigenmode' in info.")
