@@ -54,7 +54,8 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
         try:
             optimizable = FrechetCellFilter(atoms) if config_dict['our'+method_name]['relax_cell'] else atoms
             converged = relax_structure(config_dict, optimizable, temp_opt_log, temp_traj, Optimizer)
-            atoms.calc = SinglePointCalculator(atoms, energy=atoms.get_potential_energy(), forces=atoms.get_forces())
+            energy = atoms.get_potential_energy()
+            forces = atoms.get_forces()
 
             if converged:
                 status = "converged"
@@ -67,6 +68,7 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
             atoms.info['parent_ts_index'] = parent_source_idx
             atoms.info['src_index'] = i
             atoms.wrap()
+            atoms.calc = SinglePointCalculator(atoms, energy=energy, forces=forces)
 
             writer.write(atoms)
 
@@ -152,11 +154,8 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
             # --- PREPARE TS (Middle Image) ---
             ts_atoms = atoms.copy()
             ts_atoms.info = atoms.info.copy()
-            ts_atoms.calc = SinglePointCalculator(
-                ts_atoms,
-                energy=atoms.get_potential_energy(),
-                forces=atoms.get_forces()
-            )
+            ts_energy = atoms.get_potential_energy()
+            ts_forces = atoms.get_forces()
 
             # --- MINIMIZE BOTH SIDES ---
             mins = {}  # side -> (atoms, converged)
@@ -179,9 +178,8 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                 if side == skip_side:
                     # Desorption direction: use TS as placeholder, no optimization
                     min_atoms = ts_atoms.copy()
-                    min_atoms.calc = SinglePointCalculator(min_atoms,
-                        energy=ts_atoms.get_potential_energy(),
-                        forces=ts_atoms.get_forces())
+                    energy = ts_energy
+                    forces = ts_forces
                     conv = True
                 elif should_run:
                     if continuation_data and side in continuation_data and continue_from_result:
@@ -198,21 +196,24 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
 
                     optimizable = FrechetCellFilter(min_atoms) if config_dict['our'+method_name]['relax_cell'] else min_atoms
                     conv = relax_structure(config_dict, optimizable, log_f, traj_f, Optimizer)
-                    min_atoms.calc = SinglePointCalculator(min_atoms, energy=min_atoms.get_potential_energy(), forces=min_atoms.get_forces())
+                    energy = min_atoms.get_potential_energy()
+                    forces = min_atoms.get_forces()
                 else:
                     if not (continuation_data and side in continuation_data):
                         raise ValueError(f"Missing continuation data for kept side={side}")
                     min_atoms = continuation_data[side].copy()
                     conv = bool(min_atoms.info.get('orig_info', {}).get('converged'))
+                    energy = min_atoms.get_potential_energy()
+                    forces = min_atoms.get_forces()
 
                 min_atoms.info['side'] = side
                 min_atoms.info['parent_ts_index'] = parent_source_idx
                 min_atoms.info['converged'] = conv
                 min_atoms.info['src_index'] = i
-                mins[side] = (min_atoms, conv)
+                mins[side] = (min_atoms, conv, energy, forces)
 
-            min1, conv1 = mins[-1]
-            min2, conv2 = mins[1]
+            min1, conv1, min1_energy, min1_forces = mins[-1]
+            min2, conv2, min2_energy, min2_forces = mins[1]
 
             # --- CHECK REACTION ---
             neighbor_fudge = 1.25
@@ -255,6 +256,9 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
             min1.wrap()
             ts_atoms.wrap()
             min2.wrap()
+            min1.calc = SinglePointCalculator(min1, energy=min1_energy, forces=min1_forces)
+            ts_atoms.calc = SinglePointCalculator(ts_atoms, energy=ts_energy, forces=ts_forces)
+            min2.calc = SinglePointCalculator(min2, energy=min2_energy, forces=min2_forces)
             writer.write(min1)
             writer.write(ts_atoms)
             writer.write(min2)

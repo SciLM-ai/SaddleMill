@@ -580,7 +580,8 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
                 # Write all images in this segment (imin endpoints duplicated across segments)
                 for j in range(seg_start, seg_end + 1):
                     img = neb.images[j].copy()
-                    img.calc = SinglePointCalculator(img, energy=neb.energies[j], forces=neb.real_forces[j])
+                    img_energy = float(neb.energies[j])
+                    img_forces = neb.real_forces[j]
 
                     if j == 0 or j == neb.nimages - 1:
                         image_type = "endpoint"
@@ -611,6 +612,7 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
                         img.info['dE'] = seg_dE
 
                     img.wrap()
+                    img.calc = SinglePointCalculator(img, energy=img_energy, forces=img_forces)
                     writer.write(img)
 
                 log_status(seg_status, sub_band_id=seg_idx)

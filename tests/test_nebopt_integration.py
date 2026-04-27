@@ -52,10 +52,21 @@ class TestNebopt:
         return images
 
     def _read_output_traj(self, tmp_path):
-        """Read output trajectory frames."""
+        """Read output trajectory frames.
+
+        Asserts every frame round-trips with energy/forces in calc.results
+        (regression guard for the SinglePointCalculator + atoms.wrap() race).
+        """
         traj_path = tmp_path / "NEB_trajes" / "collected_ts_rank_0.traj"
         assert traj_path.exists(), f"Output trajectory not found at {traj_path}"
-        return Trajectory(str(traj_path), "r")
+        traj = Trajectory(str(traj_path), "r")
+        for idx, frame in enumerate(traj):
+            assert frame.calc is not None, f"Frame {idx} has no calculator after read-back"
+            assert 'energy' in frame.calc.results, (
+                f"Frame {idx} missing energy — SPC+wrap race regression")
+            assert 'forces' in frame.calc.results, (
+                f"Frame {idx} missing forces — SPC+wrap race regression")
+        return traj
 
     def _read_csv(self, tmp_path):
         """Read CSV status lines."""
