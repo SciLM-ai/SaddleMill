@@ -117,7 +117,7 @@ conda create --prefix /work/08405/ilgar/vista/conda_libraries/tsearch --clone ex
 
 pip config set global.cache-dir "/path/to/your/cache/directory"  # like $SCRATCH/.cache/pip
 
-pip install fairchem-core scipy==1.16
+pip install "fairchem-core>=2.19.0" "ase>=3.26.0" scipy==1.16
 # If you want Vasp inpute files to be created like in omat/oc20:
 pip install fairchem-data-omat
 # If you will need some of the catsunami functionality or create Vasp input files for oc20

@@ -4,6 +4,14 @@
 
 tsearch is a Python library for creating datasets of Transition States (TS) using neural network potentials (FAIRChemCalculator / Meta's UMA model) or DFT (VASP / VaspInteractive). It supports distributed GPU execution on HPC systems (NERSC Perlmutter, TACC Vista/LS6) via executorlib + Flux.
 
+## Dependencies
+
+Minimum required versions (baseline, enforced in `pyproject.toml`):
+- `ase >= 3.26.0`
+- `fairchem-core >= 2.19.0`
+
+Both are required by the package — `fairchem-core` registers the LMDB backend that `ase.db.connect` uses for `.aselmdb` files, and `ase >= 3.26.0` is the first ASE release whose `db` layer wires up that backend correctly. Any code path that does ASE LMDB I/O must `import fairchem.core.datasets` before calling `ase.db.connect`.
+
 ## Entry Point
 
 ```bash
