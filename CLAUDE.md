@@ -44,35 +44,46 @@ config.py            FluxJobExecutor (distributed) or serial mode
 nebopt.py / dimeropt.py / geomopt.py  (method functions)
     |
     v
-catsunami/ocpneb.py  (OCPNEB: batched NEB with swDNEB switching)
+catsunami/ocpneb.py  (OCPNEB: batched NEB with optional swDNEB)
 ```
+
+Auxiliary entry points:
+- `python -m tsearch.status [dir]` — summarize completion state of a results directory (see `status.py`)
+- `python -m tsearch.analyze_neb [dir]` — generate plots + text reports for not-converged NEB jobs (see `analyze_neb.py`)
 
 ## Key Modules
 
 ### `config.py`
-- `ConfigManager`: Reads `config.ini` with type inference (bool/int/float/list/string). Quoted strings (`"..."` or `'...'`) preserved as literal strings (for VASP commands with spaces).
+- `ConfigManager`: Reads `config.ini` with type inference (bool/int/float/list/string). Quoted strings (`"..."` or `'...'`) preserved as literal strings (for VASP commands with spaces). Warns on unrecognized keys in known sections.
+- **Backward-compat key migration** (`_RENAMED_KEYS` + `_migrate_renamed_keys`): silently renames `intermediate_minima_check_interval` → `intermediate_minima_check_step`, `add_images_check_interval` → `add_images_step`. The removed bool `intermediate_minima = True` is auto-converted to `intermediate_minima_check_step = 100`.
 - `load_calculator()`: Returns calculator class/callable (`FAIRChemCalculator`, `Vasp`, or `VaspInteractive`). For FAIRChem, returns `from_model_checkpoint`; for VASP, returns the class itself. Instantiation deferred to `init_function.py` (FAIRChem) or `nebopt.py` (VASP, per-image). VASP support is NEB only; Dimer/Minimization/DoubleMinimization require FAIRChemCalculator.
 - `load_method()`: Imports the correct optimization function
 - `load_optimizer()`: Returns optimizer class(es) - for NEB returns (endpoint_optimizer, neb_optimizer)
 - `get_trajes_and_indices()`: Recursively scans dir_path (including subdirectories) for .traj files, splits into job batches
-- Resume support: `get_remaining_trajes()` skips completed jobs
+- Resume support: `get_remaining_trajes()` skips completed jobs; `build_redo_info()`, `archive_and_clean_csvs()`, `archive_and_clean_outputs()` implement the `run_jobs` archive-and-redo flow
+- `create_results_directories()`, `read_status_csv_rows()`, `get_flux_resources()` round out the helper surface used by `__main__.py`
 
 ### `nebopt.py` - NEB Workflow
 1. **Continuation check**: When `entries_to_run` is set, overrides starting images from `continuation_data`. All NEB settings always come from config.ini. `continue_from_result=True` uses extracted images directly and seeds imin/frozen/frozen_fmax from previous result; config controls whether new imin/images are detected on top of seeded state. `False` falls through to fresh run. Always full-band (no sub-band reruns).
-2. **Endpoint relaxation** (optional): Relaxes reactant/product with configurable optimizer (e.g., LBFGS). For VaspInteractive, calculators finalized after relaxation and endpoints frozen with `SinglePointCalculator`.
+2. **Endpoint relaxation** (optional): Relaxes reactant/product with `endpoint_relax_Optimizer` (defaults to `Main.Optimizer` if `None`), to `endpoint_relax_fmax` within `endpoint_relax_steps`. For VaspInteractive, calculators finalized after relaxation and endpoints frozen with `SinglePointCalculator`.
 3. **Interpolation**: `ocp_idpp` (Meta's PBC-aware), `ase_idpp`, `ase_linear` (auto-falls back to IDPP on atom overlap), or `False` (use provided frames)
-4. **NEB optimization**: Uses `OCPNEB` with MDMin optimizer. Supports climbing image and intermediate minima (per-segment climbing). For VASP/VaspInteractive: per-image calculators in `VASP_{job_id}_{image_idx}/` dirs, separate `command`/`ncore` for endpoints vs intermediates, WAVECAR/CHG/CHGCAR cleanup after completion. VaspInteractive endpoint calculators finalized before `SinglePointCalculator` replacement; intermediate calculators finalized after NEB completes. **One-shot events**: `intermediate_minima_check_step` triggers imin detection at a specific step (one-shot, not periodic; 0 = disabled); `add_images_step` triggers image addition at a specific step (one-shot). **`_detect_imin()`**: Standalone function in nebopt.py. One-shot detection with exclusion based on existing imin +/-1 positions. Merges with existing imin_set. Auto image addition: when `max_num_frames > num_frames`, doubles images in unconverged segments at `add_images_step` (FAIRChem only). **Auto-freeze** (FAIRChem only, always on): OCPNEB checks for converged sub-bands/imin/CIs each step, adds to `_frozen_set`. Frozen images are skipped in FAIRChem batching after first eval (cached), report cached NEB-modified fmax (not 0), and act as segment boundaries. Only sub-bands (all below threshold), individual imin (below `endpoint_fmax`), and individual CIs (below `fmax`) can freeze — never regular images.
+4. **NEB optimization**: Uses `OCPNEB` with the configured band optimizer (default MDMin). Supports climbing image and intermediate minima (per-segment climbing). For VASP/VaspInteractive: per-image calculators in `VASP_{job_id}_{image_idx}/` dirs, separate `command`/`ncore` for endpoints vs intermediates, WAVECAR/CHG/CHGCAR cleanup after completion. VaspInteractive endpoint calculators finalized before `SinglePointCalculator` replacement; intermediate calculators finalized after NEB completes. The optimization is split into phases driven by **one-shot events**: `intermediate_minima_check_step` triggers imin detection at a specific step (one-shot, not periodic; 0 = disabled); `add_images_step` triggers image addition at a specific step (one-shot). When an event fires, NEB stops, the event runs, and a fresh optimizer instance resumes the same NEB object until the next event or the global step budget runs out.
+   - **`_detect_imin()`**: Standalone function in nebopt.py. One-shot detection with exclusion based on existing imin +/-1 positions. Merges with existing imin_set.
+   - **`_relax_imin()`**: After detection, each newly detected imin is relaxed individually with `endpoint_relax_Optimizer` (or `Main.Optimizer`) to `endpoint_relax_fmax` within `endpoint_relax_steps`. Relaxed imin below `endpoint_relax_fmax` are added to `neb._frozen_set` so they act as segment boundaries from then on. Logs/trajs `imin_relax_{file_tag}_img{idx}.{log,traj}` are tracked in temp files for cleanup/zip.
+   - **Auto image addition** (FAIRChem only): when `max_num_frames > num_frames`, `_expand_band()` doubles images in unconverged segments at `add_images_step` via IDPP interpolation; `_remap_indices()` keeps imin/frozen/climbing indices consistent across the expansion.
+   - **Auto-freeze** (FAIRChem only, always on): OCPNEB checks for converged sub-bands/imin/CIs each step, adds to `_frozen_set`. Frozen images are skipped in FAIRChem batching after first eval (cached), report cached NEB-modified fmax (not 0), and act as segment boundaries. Only sub-bands (all below threshold), individual imin (below `endpoint_fmax`), and individual CIs (below `fmax`) can freeze — never regular images.
 5. **Post-NEB refinement** (optional, FAIRChem only): If band not fully converged: (a) `dimer_refine_ci=True`: quick ASE dimer on each unconverged CI, seeded with NEB tangent as eigenmode, using `[DimerControl]` config. Updates CI position in the band, then calls `neb.get_forces()` to obtain proper NEB fmax, and freezes with cached NEB fmax. (b) `refine_band_steps > 0`: always runs if band not converged. Reuses the SAME NEB object with a new optimizer — all imin/CI/frozen state preserved (no separate OCPNEB instance). Uses `_setup_dimer()` from `dimeropt.py` (shared helper).
-6. **Output**: Writes ALL band images as separate frames to output traj. Each image gets `src_index`, `image_idx`, `subband_idx`, `image_type` (endpoint/intermediate_minimum/climbing/regular), `effective_fmax`, `image_converged`, `band_converged`, `band_converged_CI`. CI images additionally get `eigenmode`, `barrier`, `dE`. Imin images duplicated so each sub-band is self-contained. Generates band plot PNG. Result extraction uses the same NEB object's state directly (no state loss).
+6. **Output**: Writes ALL band images as separate frames to output traj. Each image gets `src_index`, `image_idx`, `subband_idx`, `image_type` (endpoint/intermediate_minimum/climbing/regular), `effective_fmax`, `image_converged`, `band_converged`, `band_converged_CI`, `nimages`, `interpolation_method`, `task_name`, and the per-step band-wide sets `imin_set`/`climbing_set`/`frozen_set` are stamped on every image (set by OCPNEB). CI images additionally get `eigenmode`, `barrier`, `dE`. Imin images duplicated so each sub-band is self-contained. Generates band plot PNG. Result extraction uses the same NEB object's state directly (no state loss).
 
 ### `catsunami/ocpneb.py` - Core NEB Engine
 - **`OCPNEB`** (extends BaseNEB): Two modes controlled by `vasp` flag:
   - **FAIRChem mode** (`vasp=False`): Batch-evaluates intermediate images via FAIRChemCalculator. Caches forces between calls. fairchem imports are lazy.
   - **VASP mode** (`vasp=True`): Delegates to parent `BaseNEB` for per-image force evaluation. Each image has its own VASP calculator. No batching/caching/fairchem dependency. When `initial_imin_set` or `frozen_images` provided, bypasses `BaseNEB.get_forces()` and evaluates individually to route through custom `get_precon_forces()`.
   - Both modes: Handles constraints (fixed atoms by tag=0 or explicit). Stores full `real_forces` array `(nimages, natoms, 3)` including endpoints for uniform access via `real_forces[imax]`.
-- **Intermediate minima support**: OCPNEB no longer detects intermediate minima internally — imin_set is externally managed by nebopt.py (via `_detect_imin()`). `initial_imin_set` seeds known positions. Detected minima receive pure PES forces (no spring/tangent projection) to relax into the basin. Band splits into segments at minima; each segment gets its own climbing image (highest-energy interior, recomputed every step). `imax` = global highest-energy CI.
-- **Frozen images**: `frozen_images` constructor param provides initial set; `frozen_fmax` constructor param (dict: img_idx -> cached NEB fmax) provides initial fmax cache; `freeze_fmax`/`freeze_endpoint_fmax` enable auto-freeze via `_auto_freeze()`. Frozen images: (1) report cached NEB-modified fmax (not 0), (2) skipped in FAIRChem batching after first eval (cached in `_frozen_energies`/`_frozen_pbc_forces`), (3) segment boundaries for CI selection. Imin detection exclusion zone is based on existing imin +/-1 (NOT frozen set) — new imin can be next to frozen CIs but not other imin. Only converged sub-bands, individual converged imin, and individual converged CIs can freeze — never regular images. `_auto_freeze()` runs after fmax computation; caches NEB fmax for newly frozen images in `_frozen_fmax_cache`; new freezes take effect next force call.
-- **Per-image effective fmax**: After NEB force modifications in `get_precon_forces()`, computes `max|F|` per image (regular: NEB-modified; climbing: PES + doubled reversed tangential; imin: pure PES; frozen: cached NEB fmax from freeze time). Stored in `self.image_fmax` and `image.info['effective_fmax']`.
+  - `dneb=True` swaps the band's NEBMethod for `swDNEB` (default `False` → standard `improvedtangent` from BaseNEB).
+- **Intermediate minima support**: OCPNEB no longer detects intermediate minima internally — imin_set is externally managed by nebopt.py (via `_detect_imin()`). `initial_imin_set` seeds known positions. Detected minima receive pure PES forces (no spring/tangent projection) to relax into the basin. Band splits into segments at minima; each segment gets its own climbing image (highest-energy interior, recomputed every step via `_find_segment_ci()`). `imax` = global highest-energy CI.
+- **Frozen images**: `frozen_images` constructor param provides initial set; `frozen_fmax` constructor param (dict: img_idx -> cached NEB fmax) provides initial fmax cache; `freeze_fmax`/`freeze_endpoint_fmax` enable auto-freeze via `_auto_freeze()`. Frozen images: (1) report cached NEB-modified fmax (not 0), (2) skipped in FAIRChem batching after first eval (cached in `_frozen_energies`/`_frozen_pbc_forces`), (3) segment boundaries for CI selection. Imin detection exclusion zone is based on existing imin +/-1 (NOT frozen set) — new imin can be next to frozen CIs but not other imin. Only converged sub-bands, individual converged imin, and individual converged CIs can freeze — never regular images. `_auto_freeze()` runs after fmax computation; caches NEB fmax for newly frozen images in `_frozen_fmax_cache`; new freezes take effect next force call. Frozen CIs are "sticky" — they remain the climbing image for their segment even if a later image becomes higher-energy.
+- **Per-image effective fmax**: After NEB force modifications in `get_precon_forces()`, computes `max|F|` per image (regular: NEB-modified; climbing: PES + doubled reversed tangential; imin: pure PES; frozen: cached NEB fmax from freeze time). Stored in `self.image_fmax` and `image.info['effective_fmax']`. Each force call also stamps `nimages` on every image and the band-wide sets `imin_set`/`climbing_set`/`frozen_set` on `image[0]`.
 - **`swDNEB`** (NEBMethod subclass): Switched Doubly Nudged Elastic Band (works with FAIRChem and VASP):
   - Improved tangent vectors (energy-weighted at extrema)
   - Perpendicular spring force to straighten band
@@ -99,7 +110,7 @@ Reaction types configured via `reaction_types` (space-separated list). Bulk and 
 
 | Type | Function | Description | Atoms displaced |
 |------|----------|-------------|-----------------|
-| `vacancy` | `get_vacancy_attempts()` | Remove atom, neighbor hops into vacancy | 1 (center-based) |
+| `vacancy` | `get_vacancy_attempts()` | Remove atom, then one of three sub-mechanisms (NN hop into vacancy, NNN hop, concerted 2-atom chain) chosen at random per attempt | 1–N (center-based) |
 | `hop_reuse` | `get_hop_reuse_attempts()` | Existing atom relocated to interstitial site | 1 (vector) |
 | `hop_insert` | `get_hop_insert_attempts()` | New small atom (H/C/N/O/B) inserted at interstitial | 1 (vector) |
 | `kickout_reuse` | `get_kickout_reuse_attempts()` | Existing atom to interstitial, kicks nearest into another | 2 (vector) |
@@ -107,9 +118,11 @@ Reaction types configured via `reaction_types` (space-separated list). Bulk and 
 | `ring` | `get_ring_attempts()` | Ring of 2+ atoms rotate cooperatively; size from `ring_sizes` config. `ring_sizes = 2` for pairwise exchange. | N (vector) |
 | `initial_guess` | `get_initial_guess_attempts()` | No displacement — starts from input as-is (supercell skipped). For pre-prepared TS guesses. Exclusive: ignores other types with warning. Always 1 attempt. Works with both `bulk` and `oc`. Uses eigenmode from `atoms.info['eigenmode']` or `atoms.info['orig_info']['eigenmode']` if present. | 0 (none) |
 
+All bulk types (except `initial_guess`) route directed displacement candidates through `_maybe_gaussian()`, which with 10% probability replaces the directed vector with broad isotropic Gaussian noise on the same atom set — keeps a stochastic exploration tail on top of the geometric heuristics.
+
 **OC reaction types** (`dataset_type = oc`):
 
-Adsorbate atoms: tag=2 (fallback tag=1). Substrate (tag=0) fixed via `FixAtoms`.
+Adsorbate atoms: tag=2 only (no fallback). Substrate (tag=0) fixed via `FixAtoms`. If no tag=2 atoms exist, OC reaction-type generators emit a warning and return no attempts.
 
 | Type | Function | Description | Displacement mechanism |
 |------|----------|-------------|----------------------|
@@ -123,28 +136,36 @@ Adsorbate atoms: tag=2 (fallback tag=1). Substrate (tag=0) fixed via `FixAtoms`.
 | `custom` | `get_custom_attempts()` | Displacement fully controlled by `[DimerControl]` settings | Empty dict (pure DimerControl defaults) |
 | `initial_guess` | `get_initial_guess_attempts()` | Same as bulk `initial_guess` | 0 (none) |
 
-**OC helpers:** `_get_oc_adsorbate_indices(atoms)` (tag=2, fallback tag=1), `_get_oc_neighbor_mask(atoms, adsorbate_indices)` (natural_cutoffs * 1.25), `_sample_adsorbate_atoms(adsorbate_indices, num_needed)` (cycles if fewer available).
+**OC helpers:** `_get_oc_adsorbate_indices(atoms)` (tag=2 only), `_get_oc_neighbor_mask(atoms, adsorbate_indices)` (natural_cutoffs * 1.25), `_sample_adsorbate_atoms(adsorbate_indices, num_needed)` (cycles if fewer available).
 
 **Key infrastructure:**
-- `find_interstitial_sites(atoms)`: Voronoi on 3x3x3 periodic images → filter by min distance → cluster within 0.5 Å. Uses `scipy.spatial.Voronoi` and `scipy.cluster.hierarchy`.
+- `find_interstitial_sites(atoms, min_dist_frac=0.4)`: Voronoi on 3x3x3 periodic images → filter by min distance (`min_dist_frac * avg_nn_dist`) → cluster within 0.5 Å. Uses `scipy.spatial.Voronoi` and `scipy.cluster.hierarchy`.
 - `_mic_vector()` / `_nearest_site()`: Minimum image convention helpers.
-- `_find_ring(neighbors_dict, seed, ring_size)`: Finds closed rings via constrained random walk. Size=2 → pairwise exchange; ≥3 → cooperative rotation.
-- Element sampling: `hop_insert` weights by 1/covalent_radius (H favored). `kickout_insert` uses Gaussian weight centered on host avg covalent radius (σ=0.2 Å) from 30 metals/semiconductors.
+- `_find_ring(neighbors_dict, seed, ring_size)`: Finds closed rings via constrained random walk. Size=2 → pairwise exchange (with perpendicular dodge vectors so the two atoms don't collide along the bond axis); ≥3 → cooperative rotation.
+- Element sampling: `hop_insert` weights by 1/covalent_radius via `_sample_hop_insert_element` (H favored). `kickout_insert` uses Gaussian weight centered on host avg covalent radius (σ=0.2 Å) from 30 metals/semiconductors via `_sample_kickout_insert_element`.
+- `_get_atom_selection_weights(atoms)`: inverse-covalent-radius weights for picking which existing atom to displace (small atoms favored).
+- `_shuffled_site_indices(num_sites)`: cycles through interstitial sites without repeats, generator pattern.
+- `_maybe_gaussian(displacement, atoms, gauss_prob=0.1, gauss_std=0.4)`: bulk-types pass directed displacements through this — with `gauss_prob` it returns broad Gaussian noise instead, adding an exploration tail.
 - `turn_into_supercell(atoms, min_length=7.0)`: Preserves `.info` across `make_supercell()`. Enforces min 7 Å cell dimensions (fairchem uses 5 Å radius graph cutoff). Called in `get_attempts()` for all types except `initial_guess` (controlled by `supercell` config, default `True`).
-- Dispatch: `get_attempts()` selects dispatch dict by `dataset_type`. `initial_guess` handled early (before bulk/oc branch).
+- Dispatch: `get_attempts()` selects dispatch dict by `dataset_type`. `initial_guess` handled early (before bulk/oc branch) and is also registered in both `_BULK_REACTION_TYPE_DISPATCH` and `_OC_REACTION_TYPE_DISPATCH`.
 - `_safe_normalize(vec)`: Returns random unit vector if norm ≈ 0.
 - `_build_neighbor_dict(atoms)`: Skips self-interactions (`i == j`) in small periodic cells.
 - Defensive guards: zero-weight fallback in `_sample_kickout_insert_element`, empty `ring_sizes` early return, missing adsorbate early return in OC mode.
 
 ### `geomopt.py` - Geometry Optimization
-- `geomopt()`: Standard relaxation with optional cell relaxation (FrechetCellFilter)
-- `doublegeomopt()`: Takes converged TS with eigenmode, displaces ±0.25*eigenmode, relaxes both directions, detects bond breaking/forming via `check_reaction()`. Reads `eigenmode`, `converged`, `src_index` from `atoms.info['orig_info']` (fallback `atoms.info`). Each frame gets `side` in `.info` (-1=min1, 0=ts, 1=min2). Writes 2 CSV lines per job. Accepts `entries_to_run`/`continuation_data` for per-side execution. Optional `pre_dimer_refine=True` (default False) runs a rotation-only dimer step via `_refine_eigenmode()` from `dimeropt.py` to refine the eigenmode direction before displacement. Rotation parameters controlled by `[DimerControl]` section (especially `max_num_rot`, `dimer_separation`). Stores refined eigenmode and curvature on the TS output frame's `.info`.
+- `geomopt()`: Standard relaxation with optional cell relaxation (FrechetCellFilter). Output frames carry `task_name` (from `get_task_name`).
+- `doublegeomopt()`: Takes converged TS with eigenmode, displaces ±0.25*eigenmode, relaxes both directions, detects bond breaking/forming via `check_reaction()` and `check_adsorbate_reaction()`. Reads `eigenmode`, `converged`, `src_index` from `atoms.info['orig_info']` (fallback `atoms.info`). Each frame gets `side` in `.info` (-1=min1, 0=ts, 1=min2). Writes 2 CSV lines per job in the form `{job_id},{rank},{side_id},{parent_source_idx},"{status_msg}"`. Accepts `entries_to_run`/`continuation_data` for per-side execution. Optional `pre_dimer_refine=True` (default False) runs a rotation-only dimer step via `_refine_eigenmode()` from `dimeropt.py` to refine the eigenmode direction before displacement. Rotation parameters controlled by `[DimerControl]` section (especially `max_num_rot`, `dimer_separation`). Stores refined eigenmode and `curvature` on the TS output frame's `.info`. The full reaction-detection metadata dict (`is_reaction`, `n_formed_bonds`, `n_broken_bonds`, `broken_bonds`, `formed_bonds`, plus `is_ads_reaction` / `n_ads_formed_bonds` / `n_ads_broken_bonds` / `ads_broken_bonds` / `ads_formed_bonds` for OC inputs) is copied onto every emitted frame (min1, TS, min2) along with `parent_ts_index` and `task_name`.
+- **Desorption-skip logic**: when `check_adsorbate_reaction()` flags the bond change as a desorption, the higher-energy side is skipped to avoid relaxing into vacuum; that side gets `side_statuses[side] = "converged_desorption_skipped"` while the other side still runs normally. The TS frame's `status` always reflects the converged TS itself.
 
 ### `tools.py` - Utilities
 - `load_and_sanitize(traj, i, j)`: Loads atoms and stashes original `.info` into `atoms.info = {"orig_info": <original_info>}`. Prevents per-atom array data from causing size mismatches on atom add/remove. Called in `__main__.py` for all methods.
-- `clean_up_files(config_dict)`: Removes leftover temp files on resume. Method-aware: NEB (`neb_*.log/traj`, `reactant/product_relaxation_*`, `diffusion_barrier_*.png`, `VASP_*_*/`), Dimer (`dimer_*.log/traj`), Minimization (`optimization_*.log/traj`).
+- `passes_input_filter(images, config_dict)`: Applies the `input_statuses` fnmatch filter to a sanitized input — checks `orig_info['status']`, returns False if a filter is set and the frame's status doesn't match (or `status` is missing). Returns True for `input_statuses = all`.
+- `save_ordered_traj_names()` / `read_ordered_traj_names()`: Persist/read the `traj_files_ordered.json` that anchors the resume contract.
+- `clean_up_files(config_dict)`: Removes leftover temp files on resume. Method-aware: NEB (`neb_*.log/traj`, `reactant/product_relaxation_*`, `imin_relax_*`, `diffusion_barrier_*.png`, `VASP_*_*/`), Dimer (`dimer_*.log/traj`), Minimization (`optimization_*.log/traj`).
+- `backup_flux_logs(worker_id)`: Snapshots flux log files for a worker before it self-kills, so the post-restart logs don't overwrite the diagnostic trail.
+- `get_task_name(config_dict)`: Returns `[FAIRChemCalculator] task_name` if FAIRChem is the calculator, else `None`. Used by all methods to stamp `task_name` on output frames so downstream consumers know which UMA task generated them.
 - **Previous result extraction**: `extract_previous_results(job_ids, config_dict, redo_info)` — unified extraction from output trajs for all methods. Returns `{job_id: continuation_data}` (Dimer: `{attempt_id: Atoms}`, NEB: `{subband_idx: [Atoms]}`, DoubleMinimization: `{side: Atoms}`, Minimization: `Atoms`). Helpers: `_build_output_traj_index()`, `_sanitize_with_continuation()`.
-- `check_reaction()` / `check_adsorbate_reaction()`: Bond detection via ASE neighbor_list with natural cutoffs, compare connectivity between structures.
+- `get_bond_set()`, `check_reaction()`, `check_adsorbate_reaction()`: Bond detection via ASE neighbor_list with natural cutoffs, compare connectivity between structures.
 
 ### `.info` Handling Rule (applies to all methods)
 
@@ -164,6 +185,27 @@ Adsorbate atoms: tag=2 (fallback tag=1). Substrate (tag=0) fixed via `FixAtoms`.
 
 ### `catsunami/reaction.py` - Reaction Definitions
 - `Reaction` class: Represents dissociation/desorption/transfer reactions with atom mappings and edge lists
+
+### `status.py` - Job Status Reporter
+Run with `python -m tsearch.status [dir]` (default: current dir). Reads `config.ini`, `traj_files_ordered.json`, and `{method}_status_csvs/status_rank_*.csv` to print:
+- Total/started/remaining job counts (honors `input_statuses` filter via the same `passes_input_filter` logic as `__main__.py`)
+- Expected-vs-completed entries per job (Dimer: `len(reaction_types) * num_attempts_per_type`; DoubleMinimization: 2; Minimization: 1; NEB: unknown — band-level only)
+- Per-status percentage breakdown
+- Method-specific summaries: Dimer per-reaction-type table (`_print_dimer_reaction_type_table`); NEB per-job convergence + sub-band count distribution (`_print_neb_job_summary`)
+
+### `analyze_neb.py` - NEB Diagnostics
+Run with `python -m tsearch.analyze_neb [dir]` (default: current dir). Reads `NEB_status_csvs/` + `NEB_debug_zips/` and emits a per-job analysis bundle into `neb_analysis/`:
+- `job_{job_id}_overview.png` — band fmax vs step, per-image fmax heatmap, energy profile, image-type counts
+- `job_{job_id}_per_image_fmax.png` — grid of per-image fmax evolution
+- `job_{job_id}_refinement.png` — dimer-CI / imin-relax / refine-NEB refinement results
+- `job_{job_id}_energy_evolution.png` — band energy profiles at regular checkpoints
+- `job_{job_id}_fmax_timeline.png` — stacked image-type timeline + per-image fmax lines
+- `analysis_report.txt` — combined plain-text report with event timeline, per-image convergence, sub-band analysis, and a "why didn't it converge" summary
+
+Module-level config: `ANALYZE_STATUSES = {"not_converged", "converged"}` (set to `None`/empty to include every status), `FMAX_THRESHOLD = 0.05`, `ENDPOINT_FMAX = 0.02`, `FROZEN_THRESHOLD = 1e-6`. Internal helpers: `parse_optimizer_log`, `parse_dimer_log`, `parse_neb_trajectory` (reconstructs per-step `imin_set`/`climbing_set`/`frozen_set` events), `extract_job_files`, `compute_path_distances`, `load_status_csv`, plus the `plot_*` and `generate_text_report` functions.
+
+### `nebtools/`
+Standalone scripts for preparing NEB inputs. Currently `create_endpoints_for_MP_batteries.py` (Materials Project battery dataset endpoint generation by ion substitution).
 
 ## Configuration Reference (`config.ini`)
 
@@ -361,11 +403,13 @@ NEB_debug_zips/                      # Compressed log/traj/plot files
 
 Every output frame (all methods) carries `status` — the CSV status string that was written for that entry, used by `input_statuses` for downstream filtering.
 
-NEB output image metadata: `src_index`, `image_idx`, `subband_idx`, `image_type` (endpoint/intermediate_minimum/climbing/regular), `effective_fmax`, `image_converged`, `band_converged`, `band_converged_CI`, `status`, `nimages`, `interpolation_method`, `orig_info`. CI images also get `eigenmode`, `barrier`, `dE`. Every image in a sub-band shares the sub-band's `status` (`converged` / `converged_CI` / `not_converged`). Imin images duplicated for sub-band self-containment. NEB CSV is still per-sub-band lines; band-level run_jobs categorization requires ALL sub-bands converged/converged_CI.
+All output frames also carry `task_name` (the FAIRChem task that produced them, or `None` for VASP) so downstream filtering/training can keep tasks separated.
 
-Dimer output: `eigenmode`, `curvature`, `converged`, `src_index`, `attempt_id`, `stoprun`, `selected_index`, `reaction_type`, `status`, `orig_info`.
+NEB output image metadata: `src_index`, `image_idx`, `subband_idx`, `image_type` (endpoint/intermediate_minimum/climbing/regular), `effective_fmax`, `image_converged`, `band_converged`, `band_converged_CI`, `status`, `nimages`, `interpolation_method`, `imin_set`/`climbing_set`/`frozen_set` (band-wide, stamped on each image), `task_name`, `orig_info`. CI images also get `eigenmode`, `barrier`, `dE`. Every image in a sub-band shares the sub-band's `status` (`converged` / `converged_CI` / `not_converged`). Imin images duplicated for sub-band self-containment. NEB CSV is still per-sub-band lines; band-level run_jobs categorization requires ALL sub-bands converged/converged_CI.
 
-DoubleMinimization output: `side` (-1/0/1), `parent_ts_index`, `converged`, `src_index`, `is_reaction`, `n_formed_bonds`, `n_broken_bonds`, `status`, `orig_info`. CSV: 2 lines per job `{job_id},{rank},{side_id},{parent_ts_idx},{status}`.
+Dimer output: `eigenmode`, `curvature`, `converged`, `src_index`, `attempt_id`, `stoprun`, `selected_index`, `reaction_type`, `status`, `task_name`, `orig_info`.
+
+DoubleMinimization output: `side` (-1/0/1), `parent_ts_index`, `converged`, `src_index`, full reaction-detection dict (`is_reaction`, `n_formed_bonds`, `n_broken_bonds`, `broken_bonds`, `formed_bonds`, plus `is_ads_reaction` / `n_ads_*` / `ads_*_bonds` for OC inputs), `status` (`converged` / `converged_desorption_skipped` / `not_converged`; TS frame always `converged`), `task_name`, optional `curvature` on the TS frame when `pre_dimer_refine=True`, `orig_info`. CSV: 2 lines per job `{job_id},{rank},{side_id},{parent_ts_idx},"{status}"`.
 
 ## Execution Modes
 
@@ -406,18 +450,20 @@ tests/
 ├── conftest.py                  # Fixtures, skip logic, make_config_dict()
 ├── fixtures/                    # Small .traj files
 │   ├── bulk_crystal.traj        # 3-atom FCC crystal
+│   ├── converged_ts.traj        # Pre-converged TS for doublegeomopt tests
 │   ├── minimization_input.traj  # 68-atom slab+adsorbate
 │   ├── oc_adsorbate_slab.traj   # 131-atom slab+adsorbate
 │   └── oc_neb_pair.traj         # 10-frame NEB, 68 atoms
-├── test_config.py               # ConfigManager, load_*, run_jobs, archive/clean (~74, CPU)
-├── test_tools.py                # load_and_sanitize, check_reaction, extraction (~28, CPU)
-├── test_structure_edit.py       # Bulk & OC reaction types, supercell (~35, CPU)
-├── test_ocpneb.py               # swDNEB, forces, frozen images (~20, mixed)
+├── test_config.py               # ConfigManager, load_*, run_jobs, archive/clean (77, CPU)
+├── test_tools.py                # load_and_sanitize, check_reaction, extraction, get_task_name, passes_input_filter (42, CPU)
+├── test_structure_edit.py       # Bulk & OC reaction types, supercell (42, CPU)
+├── test_ocpneb.py               # swDNEB, forces, frozen images (20, mixed)
+├── test_spc_wrap_ordering.py    # SinglePointCalculator vs Atoms.wrap() ordering (4, CPU)
 ├── test_nebopt_integration.py   # Full NEB runs (8, GPU)
 ├── test_dimeropt_integration.py # Dimer runs (7, GPU)
 ├── test_geomopt_integration.py  # geomopt + doublegeomopt (5, GPU)
 ├── test_init_function.py        # init_function (5, GPU)
-└── test_main_integration.py     # End-to-end pipeline + resume (4, GPU)
+└── test_main_integration.py     # End-to-end pipeline + resume (6, GPU)
 ```
 
 Markers: `@pytest.mark.gpu` (CUDA, auto-skipped), `@pytest.mark.flux` (Flux scheduler), `@pytest.mark.slow` (>60s)
