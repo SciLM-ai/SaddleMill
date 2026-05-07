@@ -2,7 +2,7 @@
 
 ## Overview
 
-SaddleMill is a Python library for creating datasets of Transition States (TS) using neural network potentials (FAIRChemCalculator / Meta's UMA model) or DFT (VASP / VaspInteractive). It supports distributed GPU execution on HPC systems (NERSC Perlmutter, TACC Vista/LS6) via executorlib + Flux.
+SaddleMill is a Python library for creating datasets of Transition States (TS) using neural network potentials (FAIRChemCalculator / Meta's UMA model) or DFT (VASP / VaspInteractive). It supports distributed GPU execution on HPC systems (4 A100 per node, GH200, 3 A100 per node) via executorlib + Flux.
 
 ## Dependencies
 
@@ -476,7 +476,7 @@ Markers: `@pytest.mark.gpu` (CUDA, auto-skipped), `@pytest.mark.flux` (Flux sche
 - Integration tests use `tmp_path` + `monkeypatch.chdir()`
 - CPU structure_edit tests seed with `random.seed(42)` + `np.random.seed(42)`
 
-## HPC Setup (Perlmutter)
+## HPC Setup (4 A100 per node HPC)
 
 ```bash
 #SBATCH --constraint=gpu

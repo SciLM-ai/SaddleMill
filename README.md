@@ -4,7 +4,7 @@
 
 ### 1. Base Environment Setup
 
-#### *Lonestar6 (TACC)*
+#### *3 A100 per node HPC*
 
 Load necessary modules and create the base Conda environment.
 
@@ -23,7 +23,7 @@ find $CONDA_PREFIX -name "sched-fluxion-*.so" -path "*feedstock_root*" -exec cp 
 
 ```
 
-#### *Vista (TACC)*
+#### *GH200 HPC*
 
 Load necessary modules and create the base Conda environment.
 
@@ -47,7 +47,7 @@ MPICC=$(which mpicc) pip install --no-binary=mpi4py mpi4py
 
 ```
 
-#### *Perlmutter (NERSC)*
+#### *4 A100 per node HPC*
 
 Necessary modules (should be loaded by default):
 * `PrgEnv-gnu/8.5.0` (Compiler Suite)
@@ -101,9 +101,9 @@ MPICC="cc -shared" pip install --force-reinstall --no-cache-dir --no-binary=mpi4
 Check if flux detects all resources correctly:
 
 ```bash
-# For Vista and Perlmutter
+# For the GH200 HPC and the 4 A100 per node HPC
 srun -n 2 flux start flux resource list
-# For LS6
+# For the 3 A100 per node HPC
 srun -n 2 --mpi=pmi2 flux start flux resource list
 
 ```
@@ -125,7 +125,7 @@ pip install fairchem-data-oc
 # If you will need VaspInteractive
 pip install git+https://github.com/ulissigroup/vasp-interactive.git
 
-# This part below is only necessary for Vista (not for Lonestar6 or Perlmutter)
+# This part below is only necessary for the GH200 HPC (not for the A100-based HPCs)
 pip install "torch==2.9.0+cu128" --index-url https://download.pytorch.org/whl/cu128
 
 ```
@@ -167,7 +167,7 @@ Request an interactive node:
 
 ```bash
 idev -p gh-dev -N 1 -m 120 -A YOUR_ALLOCATION
-# or for Lonestar:
+# or for the 3 A100 per node HPC:
 idev -p gpu-a100-dev -N 1 -m 120 -A YOUR_ALLOCATION
 
 ```
@@ -177,20 +177,20 @@ idev -p gpu-a100-dev -N 1 -m 120 -A YOUR_ALLOCATION
 Ensure you run these commands (or add to `.bashrc`) every time you log in or start a job:
 
 ```bash
-# On Vista:
+# On the GH200 HPC:
 export PYTHONPATH=<saddlemill_path>:$PYTHONPATH
 export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
 export LD_LIBRARY_PATH=/opt/apps/cuda/12.4/targets/sbsa-linux/lib/:$LD_LIBRARY_PATH
 
 
-# On LS6:
+# On the 3 A100 per node HPC:
 export PYTHONPATH=<saddlemill_path>:$PYTHONPATH
 export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
 module unload impi python3
 module load cuda/12.8
 
 
-# On Perlmutter
+# On the 4 A100 per node HPC
 export PYTHONPATH=<saddlemill_path>:$PYTHONPATH
 export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
 # --- START: FIX LIBRARY PATHS ---
