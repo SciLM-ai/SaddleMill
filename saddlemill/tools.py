@@ -2,7 +2,7 @@ import numpy as np
 import json, os, glob, shutil, tempfile, zipfile, fnmatch
 from ase.neighborlist import neighbor_list, natural_cutoffs
 from ase.io import Trajectory
-from tsearch.config import VALID_RUN_CATEGORIES, _RUN_CATEGORY_ALIASES, _get_subunit_config
+from saddlemill.config import VALID_RUN_CATEGORIES, _RUN_CATEGORY_ALIASES, _get_subunit_config
 
 
 #==============================================================================

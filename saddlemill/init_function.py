@@ -1,7 +1,7 @@
 import os
 import socket
 import traceback
-from tsearch.config import load_config, load_calculator, load_optimizer
+from saddlemill.config import load_config, load_calculator, load_optimizer
 
 def init_function(executorlib_worker_id=None):
     try:

@@ -10,8 +10,8 @@ from ase.neighborlist import natural_cutoffs, neighbor_list
 from ase.io import Trajectory
 from ase.mep import DimerControl, MinModeAtoms, MinModeTranslate
 from ase.calculators.singlepoint import SinglePointCalculator
-from tsearch.dimertools.structure_edit import get_attempts
-from tsearch.tools import backup_flux_logs, get_task_name
+from saddlemill.dimertools.structure_edit import get_attempts
+from saddlemill.tools import backup_flux_logs, get_task_name
 
 
 class StopRun(Exception):

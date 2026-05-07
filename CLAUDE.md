@@ -1,8 +1,8 @@
-# tsearch - High-Throughput Transition State Search Library
+# SaddleMill - High-Throughput Transition State Search Library
 
 ## Overview
 
-tsearch is a Python library for creating datasets of Transition States (TS) using neural network potentials (FAIRChemCalculator / Meta's UMA model) or DFT (VASP / VaspInteractive). It supports distributed GPU execution on HPC systems (NERSC Perlmutter, TACC Vista/LS6) via executorlib + Flux.
+SaddleMill is a Python library for creating datasets of Transition States (TS) using neural network potentials (FAIRChemCalculator / Meta's UMA model) or DFT (VASP / VaspInteractive). It supports distributed GPU execution on HPC systems (NERSC Perlmutter, TACC Vista/LS6) via executorlib + Flux.
 
 ## Dependencies
 
@@ -15,7 +15,7 @@ Both are required by the package — `fairchem-core` registers the LMDB backend 
 ## Entry Point
 
 ```bash
-srun -N $SLURM_NNODES -n $SLURM_NNODES --gpus-per-node=4 flux start python -u -m tsearch
+srun -N $SLURM_NNODES -n $SLURM_NNODES --gpus-per-node=4 flux start python -u -m saddlemill
 ```
 
 The `__main__.py` reads `config.ini` from the current directory, loads the method, scans for `.traj` files, distributes jobs across GPUs, and collects results.
@@ -48,8 +48,8 @@ catsunami/ocpneb.py  (OCPNEB: batched NEB with optional swDNEB)
 ```
 
 Auxiliary entry points:
-- `python -m tsearch.status [dir]` — summarize completion state of a results directory (see `status.py`)
-- `python -m tsearch.analyze_neb [dir]` — generate plots + text reports for not-converged NEB jobs (see `analyze_neb.py`)
+- `python -m saddlemill.status [dir]` — summarize completion state of a results directory (see `status.py`)
+- `python -m saddlemill.analyze_neb [dir]` — generate plots + text reports for not-converged NEB jobs (see `analyze_neb.py`)
 
 ## Key Modules
 
@@ -187,14 +187,14 @@ Adsorbate atoms: tag=2 only (no fallback). Substrate (tag=0) fixed via `FixAtoms
 - `Reaction` class: Represents dissociation/desorption/transfer reactions with atom mappings and edge lists
 
 ### `status.py` - Job Status Reporter
-Run with `python -m tsearch.status [dir]` (default: current dir). Reads `config.ini`, `traj_files_ordered.json`, and `{method}_status_csvs/status_rank_*.csv` to print:
+Run with `python -m saddlemill.status [dir]` (default: current dir). Reads `config.ini`, `traj_files_ordered.json`, and `{method}_status_csvs/status_rank_*.csv` to print:
 - Total/started/remaining job counts (honors `input_statuses` filter via the same `passes_input_filter` logic as `__main__.py`)
 - Expected-vs-completed entries per job (Dimer: `len(reaction_types) * num_attempts_per_type`; DoubleMinimization: 2; Minimization: 1; NEB: unknown — band-level only)
 - Per-status percentage breakdown
 - Method-specific summaries: Dimer per-reaction-type table (`_print_dimer_reaction_type_table`); NEB per-job convergence + sub-band count distribution (`_print_neb_job_summary`)
 
 ### `analyze_neb.py` - NEB Diagnostics
-Run with `python -m tsearch.analyze_neb [dir]` (default: current dir). Reads `NEB_status_csvs/` + `NEB_debug_zips/` and emits a per-job analysis bundle into `neb_analysis/`:
+Run with `python -m saddlemill.analyze_neb [dir]` (default: current dir). Reads `NEB_status_csvs/` + `NEB_debug_zips/` and emits a per-job analysis bundle into `neb_analysis/`:
 - `job_{job_id}_overview.png` — band fmax vs step, per-image fmax heatmap, energy profile, image-type counts
 - `job_{job_id}_per_image_fmax.png` — grid of per-image fmax evolution
 - `job_{job_id}_refinement.png` — dimer-CI / imin-relax / refine-NEB refinement results
@@ -350,7 +350,7 @@ Errored entries always fall back to fresh. Continuation handled per-entry inside
 | DoubleMinimization | per-side | Continue not-converged side | Re-displace from TS |
 | Minimization | per-job | Continue from extracted structure | Original input |
 
-All methods extract via `extract_previous_results`. **`initial_guess` vs `continue_from_result`**: separate features — `initial_guess` is for **external** TS guesses (from another code/method); `continue_from_result` extracts from a **previous tsearch run**.
+All methods extract via `extract_previous_results`. **`initial_guess` vs `continue_from_result`**: separate features — `initial_guess` is for **external** TS guesses (from another code/method); `continue_from_result` extracts from a **previous SaddleMill run**.
 
 **Examples:**
 ```ini
@@ -370,7 +370,7 @@ Every output frame carries its CSV status in `.info['status']`. `input_statuses`
 
 Patterns use `fnmatch` wildcards — e.g. `converged*` matches `converged`, `converged_CI`, `converged_after_extension`, `converged_to_desorption`, `converged_desorption_skipped`. Values are a single pattern or a space-separated list. The special value `all` (the default) bypasses the filter entirely.
 
-When an explicit filter is set, frames whose `orig_info` lacks a `status` field (raw `.traj` files that have never been through tsearch) are rejected — an explicit filter is a deliberate "only these statuses" request. Use the default `all` for first-time runs on user-prepared inputs.
+When an explicit filter is set, frames whose `orig_info` lacks a `status` field (raw `.traj` files that have never been through SaddleMill) are rejected — an explicit filter is a deliberate "only these statuses" request. Use the default `all` for first-time runs on user-prepared inputs.
 
 Status strings by source:
 - **Dimer**: `converged`, `converged_after_extension`, `converged_to_desorption`, `not_converged`, `not_converged_after_extension`, `not_converged_StopRun`, `error: ...`
@@ -482,7 +482,7 @@ Markers: `@pytest.mark.gpu` (CUDA, auto-skipped), `@pytest.mark.flux` (Flux sche
 #SBATCH --constraint=gpu
 #SBATCH --gpus-per-node=4
 #SBATCH --nodes=N
-srun -N $SLURM_NNODES -n $SLURM_NNODES --gpus-per-node=4 flux start python -u -m tsearch
+srun -N $SLURM_NNODES -n $SLURM_NNODES --gpus-per-node=4 flux start python -u -m saddlemill
 ```
 
 Set `FAIRCHEM_CACHE_DIR` for model caching. Requires CUDA libraries in `LD_LIBRARY_PATH`.

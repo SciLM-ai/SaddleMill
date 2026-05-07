@@ -1,4 +1,4 @@
-"""Comprehensive tests for tsearch/tools.py."""
+"""Comprehensive tests for saddlemill/tools.py."""
 
 import os
 import json
@@ -13,7 +13,7 @@ from ase.constraints import FixAtoms
 from ase.neighborlist import natural_cutoffs
 
 from tests.conftest import make_config_dict
-from tsearch.tools import (
+from saddlemill.tools import (
     load_and_sanitize,
     passes_input_filter,
     save_ordered_traj_names,

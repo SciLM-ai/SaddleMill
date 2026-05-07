@@ -1,4 +1,4 @@
-"""End-to-end tests for tsearch/__main__.py — full serial pipeline.
+"""End-to-end tests for saddlemill/__main__.py — full serial pipeline.
 
 Tests run the complete main() pipeline in serial mode (executorlib=False),
 verify output formats (CSVs, trajectories, metadata), and test resume/continuation.
@@ -58,7 +58,7 @@ zip = False
 {_FAIRCHEM_BLOCK}
 """)
 
-        from tsearch.__main__ import main
+        from saddlemill.__main__ import main
         main()
 
         # Verify directory structure
@@ -118,7 +118,7 @@ method = improvedtangent
 allow_shared_calculator = True
 """)
 
-        from tsearch.__main__ import main
+        from saddlemill.__main__ import main
         main()
 
         # Verify CSV format: job_id,rank,sub_band_id,status
@@ -203,7 +203,7 @@ maximum_translation = 0.1
 dimer_separation = 0.01
 """)
 
-        from tsearch.__main__ import main
+        from saddlemill.__main__ import main
         main()
 
         # Verify CSV format: job_id,rank,attempt_id,selected_index,status
@@ -280,7 +280,7 @@ method = improvedtangent
 allow_shared_calculator = True
 """)
 
-        from tsearch.__main__ import main
+        from saddlemill.__main__ import main
         main()
 
         # Verify first run produced not_converged
@@ -380,7 +380,7 @@ maximum_translation = 0.1
 dimer_separation = 0.01
 """)
 
-        from tsearch.__main__ import main
+        from saddlemill.__main__ import main
         main()
 
         # First run should produce output
@@ -453,7 +453,7 @@ zip = False
 {_FAIRCHEM_BLOCK}
 """)
 
-        from tsearch.__main__ import main
+        from saddlemill.__main__ import main
         main()
 
         assert os.path.exists("traj_files_ordered.json")

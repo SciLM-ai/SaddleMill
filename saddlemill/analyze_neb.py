@@ -6,7 +6,7 @@ Extracts and analyzes neb.log / neb.traj (+ refinement files) from debug zips.
 Generates detailed plots and a text report for each not-converged job.
 
 Usage:
-    python -m tsearch.analyze_neb [directory]
+    python -m saddlemill.analyze_neb [directory]
 
 If directory is not specified, uses the current working directory.
 """

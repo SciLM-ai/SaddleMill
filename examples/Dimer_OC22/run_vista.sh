@@ -18,7 +18,7 @@ srun -N $SLURM_NNODES -n $SLURM_NNODES mkdir -p $CUDA_MPS_LOG_DIRECTORY
 
 srun -N $SLURM_NNODES -n $SLURM_NNODES nvidia-cuda-mps-control -d
 
-srun -N $SLURM_NNODES -n $SLURM_NNODES flux start python -u -m tsearch
+srun -N $SLURM_NNODES -n $SLURM_NNODES flux start python -u -m saddlemill
 
 srun -N $SLURM_NNODES -n $SLURM_NNODES bash -c "echo quit | nvidia-cuda-mps-control"
 

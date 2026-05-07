@@ -1,7 +1,7 @@
-"""Status summary for tsearch jobs.
+"""Status summary for SaddleMill jobs.
 
 Usage:
-    python -m tsearch.status [directory]
+    python -m saddlemill.status [directory]
 
 If directory is not specified, uses the current working directory.
 """
@@ -233,7 +233,7 @@ def main():
 
     # Print summary
     print(f"\n{'='*55}")
-    print(f"  tsearch Status Summary - {method}")
+    print(f"  SaddleMill Status Summary - {method}")
     print(f"{'='*55}")
     print(f"  Directory: {directory}")
     print()

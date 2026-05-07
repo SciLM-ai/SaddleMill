@@ -1,4 +1,4 @@
-"""Comprehensive tests for tsearch/dimertools/structure_edit.py."""
+"""Comprehensive tests for saddlemill/dimertools/structure_edit.py."""
 
 import random
 import warnings
@@ -10,7 +10,7 @@ from ase.build import bulk, fcc111, add_adsorbate
 from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
 
-from tsearch.dimertools.structure_edit import (
+from saddlemill.dimertools.structure_edit import (
     turn_into_supercell,
     find_interstitial_sites,
     get_vacancy_attempts,
@@ -266,7 +266,7 @@ class TestBulkKickoutInsert:
     def test_element_similar_radius(self, emt_cu_bulk):
         """The inserted element should be a metal/semiconductor (from the pool)."""
         _seed()
-        from tsearch.dimertools.structure_edit import _KICKOUT_INSERT_POOL_Z
+        from saddlemill.dimertools.structure_edit import _KICKOUT_INSERT_POOL_Z
         images, dds, idxs = get_kickout_insert_attempts(emt_cu_bulk, 5)
         for img in images:
             new_z = img.get_atomic_numbers()[-1]

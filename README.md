@@ -1,4 +1,4 @@
-# tsearch
+# SaddleMill
 
 ## Installation
 
@@ -113,7 +113,7 @@ srun -n 2 --mpi=pmi2 flux start flux resource list
 Clone the environment and install specific machine learning libraries.
 
 ```bash
-conda create --prefix /work/08405/ilgar/vista/conda_libraries/tsearch --clone executorlib
+conda create --prefix /work/08405/ilgar/vista/conda_libraries/saddlemill --clone executorlib
 
 pip config set global.cache-dir "/path/to/your/cache/directory"  # like $SCRATCH/.cache/pip
 
@@ -155,7 +155,7 @@ Add these to your `.bashrc` or run before execution to manage cache and paths:
 ```bash
 # Move cache to scratch to save home directory space
 export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
-export PYTHONPATH=<tsearch_path>:$PYTHONPATH
+export PYTHONPATH=<saddlemill_path>:$PYTHONPATH
 
 ```
 
@@ -178,20 +178,20 @@ Ensure you run these commands (or add to `.bashrc`) every time you log in or sta
 
 ```bash
 # On Vista:
-export PYTHONPATH=<tsearch_path>:$PYTHONPATH
+export PYTHONPATH=<saddlemill_path>:$PYTHONPATH
 export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
 export LD_LIBRARY_PATH=/opt/apps/cuda/12.4/targets/sbsa-linux/lib/:$LD_LIBRARY_PATH
 
 
 # On LS6:
-export PYTHONPATH=<tsearch_path>:$PYTHONPATH
+export PYTHONPATH=<saddlemill_path>:$PYTHONPATH
 export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
 module unload impi python3
 module load cuda/12.8
 
 
 # On Perlmutter
-export PYTHONPATH=<tsearch_path>:$PYTHONPATH
+export PYTHONPATH=<saddlemill_path>:$PYTHONPATH
 export FAIRCHEM_CACHE_DIR="$SCRATCH/.cache/fairchem"
 # --- START: FIX LIBRARY PATHS ---
 export PY_SITE_PKGS=$(python -c "import site; print(site.getsitepackages()[0])")
@@ -204,22 +204,22 @@ done
 
 ```
 
-### Running tsearch
+### Running SaddleMill
 
 Create a `config.ini` in your working directory (see `CLAUDE.md` for full reference), place your input `.traj` files in `dir_path` (subdirectories are scanned recursively), then launch:
 
 ```bash
 # Distributed (multi-node, multi-GPU)
-srun -N $SLURM_NNODES -n $SLURM_NNODES --gpus-per-node=4 flux start python -u -m tsearch
+srun -N $SLURM_NNODES -n $SLURM_NNODES --gpus-per-node=4 flux start python -u -m saddlemill
 
 # Serial (single GPU, useful for debugging)
 # Set executorlib = False in config.ini, then:
-python -u -m tsearch
+python -u -m saddlemill
 ```
 
 ### Resume and Continuation
 
-tsearch automatically handles resume if a job times out or is interrupted:
+SaddleMill automatically handles resume if a job times out or is interrupted:
 
 - **Resume unfinished jobs**: Just resubmit with the same `config.ini`. By default (`run_jobs = remaining`), only jobs that never ran are picked up. Already-completed jobs are skipped.
 
@@ -231,7 +231,7 @@ tsearch automatically handles resume if a job times out or is interrupted:
   run_jobs = all              # Redo everything
   ```
 
-- **Continue from previous result** (`continue_from_result = True`, default): When re-running, tsearch extracts the last result from output trajs and continues optimization from there. For Dimer, each matching attempt continues with its eigenmode. For NEB, matching sub-bands continue from their extracted images. For DoubleMinimization, unconverged sides continue from their last state. Errored entries fall back to fresh generation. Set `continue_from_result = False` to generate fresh replacements (same reaction types / same sub-band endpoints).
+- **Continue from previous result** (`continue_from_result = True`, default): When re-running, SaddleMill extracts the last result from output trajs and continues optimization from there. For Dimer, each matching attempt continues with its eigenmode. For NEB, matching sub-bands continue from their extracted images. For DoubleMinimization, unconverged sides continue from their last state. Errored entries fall back to fresh generation. Set `continue_from_result = False` to generate fresh replacements (same reaction types / same sub-band endpoints).
 
 - **Archiving**: Old files are fully backed up as `previous_{N}.zip`. Only matching entries are removed from active CSVs and output trajectories (per-attempt for Dimer, per-sub-band for NEB, per-side for DoubleMinimization).
 
@@ -239,7 +239,7 @@ tsearch automatically handles resume if a job times out or is interrupted:
 
 ### Dimer: `initial_guess` Reaction Type
 
-The `initial_guess` reaction type is for running the dimer method on a **pre-prepared TS guess** from an external source (another code, a database, or a different tsearch method like NEB). It starts the dimer from the input geometry as-is with no displacement and no supercell expansion (even if `supercell = True`). If the input structure has an eigenmode in `atoms.info['eigenmode']`, it is used to seed the dimer instead of a random guess.
+The `initial_guess` reaction type is for running the dimer method on a **pre-prepared TS guess** from an external source (another code, a database, or a different SaddleMill method like NEB). It starts the dimer from the input geometry as-is with no displacement and no supercell expansion (even if `supercell = True`). If the input structure has an eigenmode in `atoms.info['eigenmode']`, it is used to seed the dimer instead of a random guess.
 
 ```ini
 [ourDimer]
@@ -247,7 +247,7 @@ dataset_type = bulk          # or oc
 reaction_types = initial_guess
 ```
 
-This is different from `continue_from_result`, which is an automatic mechanism for continuing a previous tsearch run. Use `initial_guess` when bringing a TS from outside tsearch; `continue_from_result` handles the "pick up where I left off" case internally.
+This is different from `continue_from_result`, which is an automatic mechanism for continuing a previous SaddleMill run. Use `initial_guess` when bringing a TS from outside SaddleMill; `continue_from_result` handles the "pick up where I left off" case internally.
 
 ## Testing
 

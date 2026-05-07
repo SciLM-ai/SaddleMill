@@ -3,11 +3,11 @@ import concurrent.futures
 from ase.io import Trajectory
 from itertools import groupby
 from contextlib import nullcontext
-from tsearch.init_function import init_function
-from tsearch.tools import (save_ordered_traj_names, read_ordered_traj_names,
+from saddlemill.init_function import init_function
+from saddlemill.tools import (save_ordered_traj_names, read_ordered_traj_names,
                             clean_up_files, load_and_sanitize, passes_input_filter,
                             extract_previous_results)
-from tsearch.config import (load_config, load_method, get_trajes_and_indices,
+from saddlemill.config import (load_config, load_method, get_trajes_and_indices,
                             create_results_directories, get_remaining_trajes,
                             get_flux_resources, archive_and_clean_csvs,
                             archive_and_clean_outputs, build_redo_info)
@@ -48,7 +48,7 @@ def main():
             previous_results = extract_previous_results(list(redo_info.keys()), config_dict, redo_info)
             print(f"  Extracted {len(previous_results)} of {len(redo_info)} results.", flush=True)
 
-        from tsearch.config import _normalize_run_jobs
+        from saddlemill.config import _normalize_run_jobs
         categories_to_clean = _normalize_run_jobs(config_dict["Main"]["run_jobs"])
         cleaned = archive_and_clean_csvs(config_dict, job_IDs, categories_to_clean)
         archive_and_clean_outputs(config_dict, cleaned)

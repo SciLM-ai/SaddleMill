@@ -40,16 +40,16 @@ its own tempfile for in-zip extraction; no shared state.
 
 Downstream workflow (context for future scripts)
 ------------------------------------------------
-The output of this script is intended to be fed into a tsearch `Minimization`
-run. Separately, a tsearch `DoubleMinimization` run is performed starting from
+The output of this script is intended to be fed into a SaddleMill `Minimization`
+run. Separately, a SaddleMill `DoubleMinimization` run is performed starting from
 the converged Dimer TS outputs (which were produced from these same initial
 displaced structures). A future comparison script will join the
 minimization-of-init-displaced result against the DoubleMinimization endpoints
 by `(src_index, attempt_id)` and check whether the minimized init-displaced
 structure matches either of the two double-min endpoints (connectivity
-comparison via tsearch.tools.check_reaction). Both sides of that join carry
+comparison via saddlemill.tools.check_reaction). Both sides of that join carry
 `src_index` and `attempt_id`: this script writes them by construction, and
-DoubleMinimization output preserves them through the tsearch pipeline.
+DoubleMinimization output preserves them through the SaddleMill pipeline.
 """
 import argparse
 import csv

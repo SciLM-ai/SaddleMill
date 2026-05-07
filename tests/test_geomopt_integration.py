@@ -1,4 +1,4 @@
-"""GPU integration tests for tsearch/geomopt.py using FAIRChem calculator."""
+"""GPU integration tests for saddlemill/geomopt.py using FAIRChem calculator."""
 
 import copy
 
@@ -7,7 +7,7 @@ import pytest
 from ase.io import Trajectory
 from ase.optimize import MDMin
 
-from tsearch.geomopt import geomopt, doublegeomopt
+from saddlemill.geomopt import geomopt, doublegeomopt
 from tests.conftest import make_config_dict
 
 

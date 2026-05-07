@@ -1,4 +1,4 @@
-"""GPU integration tests for tsearch/dimeropt.py using FAIRChem calculator."""
+"""GPU integration tests for saddlemill/dimeropt.py using FAIRChem calculator."""
 
 import copy
 
@@ -7,7 +7,7 @@ import pytest
 from ase.io import Trajectory
 from ase.constraints import FixAtoms
 
-from tsearch.dimeropt import dimeropt
+from saddlemill.dimeropt import dimeropt
 from tests.conftest import make_config_dict
 
 

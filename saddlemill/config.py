@@ -225,13 +225,13 @@ def load_method(config_dict):
     if method_name is None:
         raise ValueError("Configuration error: 'Main' -> 'method' is not set. Please specify a method (e.g., 'minimization') in config.ini")
     if method_name == "NEB":
-        from tsearch.nebopt import nebopt as method
+        from saddlemill.nebopt import nebopt as method
     elif method_name == "Dimer":
-        from tsearch.dimeropt import dimeropt as method
+        from saddlemill.dimeropt import dimeropt as method
     elif method_name == "Minimization":
-        from tsearch.geomopt import geomopt as method
+        from saddlemill.geomopt import geomopt as method
     elif method_name == "DoubleMinimization":
-        from tsearch.geomopt import doublegeomopt as method
+        from saddlemill.geomopt import doublegeomopt as method
     else:
         raise NotImplementedError(
             f"Method '{method_name}' is not implemented. Only NEB, Dimer, Minimization, and DoubleMinimization are supported."

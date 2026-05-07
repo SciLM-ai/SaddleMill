@@ -1,4 +1,4 @@
-"""GPU integration tests for tsearch/nebopt.py using FAIRChem calculator."""
+"""GPU integration tests for saddlemill/nebopt.py using FAIRChem calculator."""
 
 import copy
 
@@ -7,7 +7,7 @@ import pytest
 from ase.io import Trajectory
 from ase.optimize import MDMin
 
-from tsearch.nebopt import nebopt
+from saddlemill.nebopt import nebopt
 from tests.conftest import make_config_dict
 
 

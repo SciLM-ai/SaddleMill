@@ -12,9 +12,9 @@ from ase.data import covalent_radii
 from ase.calculators.singlepoint import SinglePointCalculator
 from ase.io import Trajectory
 from ase.mep.neb import NEB, NEBTools, NEBState
-from tsearch.catsunami.ocpneb import OCPNEB, _find_segment_ci
-from tsearch.dimeropt import _setup_dimer
-from tsearch.tools import backup_flux_logs, get_task_name
+from saddlemill.catsunami.ocpneb import OCPNEB, _find_segment_ci
+from saddlemill.dimeropt import _setup_dimer
+from saddlemill.tools import backup_flux_logs, get_task_name
 
 
 def _expand_band(neb, fmax_threshold, max_num_frames, num_frames, calc):
@@ -296,7 +296,7 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
 
         if need_interpolation:
             if default_interp == "ocp_idpp":
-                from tsearch.catsunami.autoframe import interpolate
+                from saddlemill.catsunami.autoframe import interpolate
                 images = interpolate(reactant, product, default_num_frames)
 
             elif default_interp[:4] == "ase_":

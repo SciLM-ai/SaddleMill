@@ -45,7 +45,7 @@ def make_config_dict(method="Minimization", **overrides):
 
     Overrides are routed to the correct config section based on key name.
     """
-    from tsearch.config import ConfigManager
+    from saddlemill.config import ConfigManager
     config = copy.deepcopy(ConfigManager.DEFAULTS)
     config["Main"]["method"] = method
     config["Main"]["executorlib"] = False

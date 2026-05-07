@@ -5,8 +5,8 @@ import zipfile
 from ase.io import Trajectory
 from ase.filters import FrechetCellFilter
 from ase.calculators.singlepoint import SinglePointCalculator
-from tsearch.tools import check_reaction, check_adsorbate_reaction, backup_flux_logs, get_task_name
-from tsearch.dimeropt import _refine_eigenmode
+from saddlemill.tools import check_reaction, check_adsorbate_reaction, backup_flux_logs, get_task_name
+from saddlemill.dimeropt import _refine_eigenmode
 
 
 def relax_structure(config_dict, optimizable, logfile, trajfile, Optimizer):

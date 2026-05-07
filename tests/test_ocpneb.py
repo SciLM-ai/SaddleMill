@@ -1,4 +1,4 @@
-"""Tests for tsearch/catsunami/ocpneb.py — OCPNEB, swDNEB, and helper functions."""
+"""Tests for saddlemill/catsunami/ocpneb.py — OCPNEB, swDNEB, and helper functions."""
 
 import pytest
 import numpy as np
@@ -18,33 +18,33 @@ class TestFindSegmentCi:
     """Tests for _find_segment_ci (pure logic, no calculator needed)."""
 
     def test_ci_in_segment(self):
-        from tsearch.catsunami.ocpneb import _find_segment_ci
+        from saddlemill.catsunami.ocpneb import _find_segment_ci
         energies = [0.0, 0.1, 0.5, 0.3, 0.2, 0.0]
         result = _find_segment_ci(0, 5, climbing_set={2}, energies=energies)
         assert result == 2
 
     def test_no_interior_images(self):
-        from tsearch.catsunami.ocpneb import _find_segment_ci
+        from saddlemill.catsunami.ocpneb import _find_segment_ci
         energies = [0.0, 0.1, 0.5, 0.3]
         # Adjacent segment [1, 2] has no interior
         result = _find_segment_ci(1, 2, climbing_set=set(), energies=energies)
         assert result is None
 
     def test_ci_outside_segment_uses_fallback(self):
-        from tsearch.catsunami.ocpneb import _find_segment_ci
+        from saddlemill.catsunami.ocpneb import _find_segment_ci
         energies = [0.0, 0.1, 0.5, 0.8, 0.3, 0.0]
         # CI at 5 is outside segment [0, 4], fallback to max energy interior
         result = _find_segment_ci(0, 4, climbing_set={5}, energies=energies)
         assert result == 3  # highest energy in interior of [0,4]
 
     def test_fallback_to_max_energy(self):
-        from tsearch.catsunami.ocpneb import _find_segment_ci
+        from saddlemill.catsunami.ocpneb import _find_segment_ci
         energies = [0.0, 0.2, 0.5, 0.3, 0.1, 0.0]
         result = _find_segment_ci(0, 5, climbing_set=set(), energies=energies)
         assert result == 2  # max energy interior image
 
     def test_multiple_cis_picks_first_in_set(self):
-        from tsearch.catsunami.ocpneb import _find_segment_ci
+        from saddlemill.catsunami.ocpneb import _find_segment_ci
         energies = [0.0, 0.2, 0.5, 0.7, 0.3, 0.0]
         # Both 2 and 3 are CIs, but iteration order of set may vary;
         # function returns the first one found in climbing_set that's in [1,4]
@@ -76,7 +76,7 @@ class TestSwDNEB:
         return s
 
     def test_monotonic_increasing_uses_spring2(self):
-        from tsearch.catsunami.ocpneb import swDNEB
+        from saddlemill.catsunami.ocpneb import swDNEB
 
         class FakeNEB:
             pass
@@ -91,7 +91,7 @@ class TestSwDNEB:
         np.testing.assert_allclose(tangent, expected, atol=1e-10)
 
     def test_monotonic_decreasing_uses_spring1(self):
-        from tsearch.catsunami.ocpneb import swDNEB
+        from saddlemill.catsunami.ocpneb import swDNEB
 
         class FakeNEB:
             pass
@@ -106,7 +106,7 @@ class TestSwDNEB:
         np.testing.assert_allclose(tangent, expected, atol=1e-10)
 
     def test_extremum_weighted_blend(self):
-        from tsearch.catsunami.ocpneb import swDNEB
+        from saddlemill.catsunami.ocpneb import swDNEB
 
         class FakeNEB:
             pass
@@ -124,7 +124,7 @@ class TestSwDNEB:
         assert not np.allclose(tangent, spring2.t / np.linalg.norm(spring2.t), atol=0.01)
 
     def test_tangent_is_unit_vector(self):
-        from tsearch.catsunami.ocpneb import swDNEB
+        from saddlemill.catsunami.ocpneb import swDNEB
 
         class FakeNEB:
             pass
@@ -147,7 +147,7 @@ class TestOCPNEBConstruction:
     """Test OCPNEB object creation with real FAIRChem calculator."""
 
     def test_nimages_correct(self, fairchem_calc, neb_images):
-        from tsearch.catsunami.ocpneb import OCPNEB
+        from saddlemill.catsunami.ocpneb import OCPNEB
         images = [img.copy() for img in neb_images]
         for img in images:
             img.calc = fairchem_calc
@@ -155,7 +155,7 @@ class TestOCPNEBConstruction:
         assert neb.nimages == len(images)
 
     def test_batch_size_stored(self, fairchem_calc, neb_images):
-        from tsearch.catsunami.ocpneb import OCPNEB
+        from saddlemill.catsunami.ocpneb import OCPNEB
         images = [img.copy() for img in neb_images]
         for img in images:
             img.calc = fairchem_calc
@@ -163,7 +163,7 @@ class TestOCPNEBConstruction:
         assert neb.batch_size == 6
 
     def test_reactant_energy_finite(self, fairchem_calc, neb_images):
-        from tsearch.catsunami.ocpneb import OCPNEB
+        from saddlemill.catsunami.ocpneb import OCPNEB
         images = [img.copy() for img in neb_images]
         for img in images:
             img.calc = fairchem_calc
@@ -171,7 +171,7 @@ class TestOCPNEBConstruction:
         assert np.isfinite(neb.reactant_energy)
 
     def test_imin_set_empty_initially(self, fairchem_calc, neb_images):
-        from tsearch.catsunami.ocpneb import OCPNEB
+        from saddlemill.catsunami.ocpneb import OCPNEB
         images = [img.copy() for img in neb_images]
         for img in images:
             img.calc = fairchem_calc
@@ -179,7 +179,7 @@ class TestOCPNEBConstruction:
         assert neb._imin_set == set()
 
     def test_climbing_set_empty_initially(self, fairchem_calc, neb_images):
-        from tsearch.catsunami.ocpneb import OCPNEB
+        from saddlemill.catsunami.ocpneb import OCPNEB
         images = [img.copy() for img in neb_images]
         for img in images:
             img.calc = fairchem_calc
@@ -192,7 +192,7 @@ class TestOCPNEBForces:
     """Test force computation with real FAIRChem."""
 
     def test_get_forces_shape(self, fairchem_calc, neb_images):
-        from tsearch.catsunami.ocpneb import OCPNEB
+        from saddlemill.catsunami.ocpneb import OCPNEB
         images = [img.copy() for img in neb_images]
         for img in images:
             img.calc = fairchem_calc
@@ -203,7 +203,7 @@ class TestOCPNEBForces:
         assert forces.shape == (nimages_interior * natoms, 3)
 
     def test_energies_populated(self, fairchem_calc, neb_images):
-        from tsearch.catsunami.ocpneb import OCPNEB
+        from saddlemill.catsunami.ocpneb import OCPNEB
         images = [img.copy() for img in neb_images]
         for img in images:
             img.calc = fairchem_calc
@@ -213,7 +213,7 @@ class TestOCPNEBForces:
         assert all(np.isfinite(neb.energies))
 
     def test_image_fmax_populated(self, fairchem_calc, neb_images):
-        from tsearch.catsunami.ocpneb import OCPNEB
+        from saddlemill.catsunami.ocpneb import OCPNEB
         images = [img.copy() for img in neb_images]
         for img in images:
             img.calc = fairchem_calc
@@ -223,7 +223,7 @@ class TestOCPNEBForces:
         assert all(neb.image_fmax >= 0)
 
     def test_real_forces_includes_endpoints(self, fairchem_calc, neb_images):
-        from tsearch.catsunami.ocpneb import OCPNEB
+        from saddlemill.catsunami.ocpneb import OCPNEB
         images = [img.copy() for img in neb_images]
         for img in images:
             img.calc = fairchem_calc
@@ -239,7 +239,7 @@ class TestOCPNEBFrozenImages:
     """Test frozen image handling."""
 
     def test_frozen_image_reports_cached_fmax(self, fairchem_calc, neb_images):
-        from tsearch.catsunami.ocpneb import OCPNEB
+        from saddlemill.catsunami.ocpneb import OCPNEB
         images = [img.copy() for img in neb_images]
         for img in images:
             img.calc = fairchem_calc
@@ -255,7 +255,7 @@ class TestOCPNEBFrozenImages:
         assert np.allclose(frozen_forces, 0.0)
 
     def test_frozen_image_excluded_from_climbing(self, fairchem_calc, neb_images):
-        from tsearch.catsunami.ocpneb import OCPNEB
+        from saddlemill.catsunami.ocpneb import OCPNEB
         images = [img.copy() for img in neb_images]
         for img in images:
             img.calc = fairchem_calc

@@ -1,4 +1,4 @@
-"""Tests for tsearch/init_function.py — worker initialization."""
+"""Tests for saddlemill/init_function.py — worker initialization."""
 
 import pytest
 import os
@@ -37,7 +37,7 @@ maxstep = 0.1
         monkeypatch.chdir(tmp_path)
         self._write_config(tmp_path)
 
-        from tsearch.init_function import init_function
+        from saddlemill.init_function import init_function
         result = init_function()
 
         assert "calc" in result
@@ -48,7 +48,7 @@ maxstep = 0.1
         monkeypatch.chdir(tmp_path)
         self._write_config(tmp_path)
 
-        from tsearch.init_function import init_function
+        from saddlemill.init_function import init_function
         result = init_function()
 
         assert result["consecutive_errors"] == [0]
@@ -61,7 +61,7 @@ maxstep = 0.1
         monkeypatch.chdir(tmp_path)
         self._write_config(tmp_path)
 
-        from tsearch.init_function import init_function
+        from saddlemill.init_function import init_function
         result = init_function()
 
         # For FAIRChemCalculator, init_function instantiates the calculator
@@ -74,7 +74,7 @@ maxstep = 0.1
         monkeypatch.chdir(tmp_path)
         self._write_config(tmp_path)
 
-        from tsearch.init_function import init_function
+        from saddlemill.init_function import init_function
         result = init_function()
 
         from ase.optimize import MDMin
@@ -103,7 +103,7 @@ maxstep = 0.1
 """
         (tmp_path / "config.ini").write_text(config_content)
 
-        from tsearch.init_function import init_function
+        from saddlemill.init_function import init_function
         result = init_function()
 
         assert isinstance(result["Optimizer"], tuple)

@@ -1,4 +1,4 @@
-"""Comprehensive tests for tsearch/config.py."""
+"""Comprehensive tests for saddlemill/config.py."""
 
 import copy
 import json
@@ -11,7 +11,7 @@ import pytest
 from ase import Atoms
 from ase.io import Trajectory
 
-from tsearch.config import (
+from saddlemill.config import (
     VALID_RUN_CATEGORIES,
     ConfigManager,
     _categorize_status,
@@ -290,25 +290,25 @@ class TestLoadMethod:
     def test_neb(self):
         config = make_config_dict(method="NEB")
         fn = load_method(config)
-        from tsearch.nebopt import nebopt
+        from saddlemill.nebopt import nebopt
         assert fn is nebopt
 
     def test_dimer(self):
         config = make_config_dict(method="Dimer")
         fn = load_method(config)
-        from tsearch.dimeropt import dimeropt
+        from saddlemill.dimeropt import dimeropt
         assert fn is dimeropt
 
     def test_minimization(self):
         config = make_config_dict(method="Minimization")
         fn = load_method(config)
-        from tsearch.geomopt import geomopt
+        from saddlemill.geomopt import geomopt
         assert fn is geomopt
 
     def test_double_minimization(self):
         config = make_config_dict(method="DoubleMinimization")
         fn = load_method(config)
-        from tsearch.geomopt import doublegeomopt
+        from saddlemill.geomopt import doublegeomopt
         assert fn is doublegeomopt
 
     def test_none_raises_value_error(self):
