@@ -115,6 +115,7 @@ def clean_up_files(config_dict):
             "optimization_*.log", "optimization_*.traj",
             "dimer_refine_*.log",
         ],
+        "SinglePoint": [],  # SP writes no temp files in cwd.
     }
 
     # VASP NEB creates per-image directories named VASP_{job_id}_{image_idx}/
@@ -192,6 +193,9 @@ def extract_previous_results(job_ids, config_dict, redo_info):
         if method_name == "Minimization":
             _sanitize_with_continuation(frames[0])
             results[job_id] = frames[0]
+        elif method_name == "SinglePoint":
+            # SP has no continuation semantics. Skip; method ignores the data.
+            continue
         else:
             # Group frames by subunit_id
             grouped = {}

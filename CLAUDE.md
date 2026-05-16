@@ -28,6 +28,7 @@ The `__main__.py` reads `config.ini` from the current directory, loads the metho
 | Dimer | `Dimer` | `dimeropt.py` | Dimer method for saddle point search |
 | Minimization | `Minimization` | `geomopt.py` | Single structure geometry optimization |
 | DoubleMinimization | `DoubleMinimization` | `geomopt.py` | TS refinement: displaces along eigenmode in both directions, relaxes, checks for reaction |
+| SinglePoint | `SinglePoint` | `geomopt.py` | One E/F call per frame; only method that accepts `.aselmdb` input. Supports `frames_per_job = N` for batched evaluation of N frames per job in one FAIRChem forward pass. FAIRChem only. |
 
 ## Architecture
 
@@ -156,6 +157,7 @@ Adsorbate atoms: tag=2 only (no fallback). Substrate (tag=0) fixed via `FixAtoms
 - `geomopt()`: Standard relaxation with optional cell relaxation (FrechetCellFilter). Output frames carry `task_name` (from `get_task_name`).
 - `doublegeomopt()`: Takes converged TS with eigenmode, displaces ±0.25*eigenmode, relaxes both directions, detects bond breaking/forming via `check_reaction()` and `check_adsorbate_reaction()`. Reads `eigenmode`, `converged`, `src_index` from `atoms.info['orig_info']` (fallback `atoms.info`). Each frame gets `side` in `.info` (-1=min1, 0=ts, 1=min2). Writes 2 CSV lines per job in the form `{job_id},{rank},{side_id},{parent_source_idx},"{status_msg}"`. Accepts `entries_to_run`/`continuation_data` for per-side execution. Optional `pre_dimer_refine=True` (default False) runs a rotation-only dimer step via `_refine_eigenmode()` from `dimeropt.py` to refine the eigenmode direction before displacement. Rotation parameters controlled by `[DimerControl]` section (especially `max_num_rot`, `dimer_separation`). Stores refined eigenmode and `curvature` on the TS output frame's `.info`. The full reaction-detection metadata dict (`is_reaction`, `n_formed_bonds`, `n_broken_bonds`, `broken_bonds`, `formed_bonds`, plus `is_ads_reaction` / `n_ads_formed_bonds` / `n_ads_broken_bonds` / `ads_broken_bonds` / `ads_formed_bonds` for OC inputs) is copied onto every emitted frame (min1, TS, min2) along with `parent_ts_index` and `task_name`.
 - **Desorption-skip logic**: when `check_adsorbate_reaction()` flags the bond change as a desorption, the higher-energy side is skipped to avoid relaxing into vacuum; that side gets `side_statuses[side] = "converged_desorption_skipped"` while the other side still runs normally. The TS frame's `status` always reflects the converged TS itself.
+- `singlepoint()`: One E/F call per frame. Only method that supports `.aselmdb` input (via `[Main] input_format = lmdb`). With `[ourSinglePoint] frames_per_job = N` (any positive integer) it bundles N frames per executorlib job and computes their energies and forces in a single batched FAIRChem forward pass via `fairchem.core.datasets.atomic_data.atomicdata_list_to_batch` + `calc.predictor.predict`, then writes the frames contiguously in input order to the same rank shard. Per-frame `natoms` may vary within a batch — forces are sliced by cumulative `natoms` offsets. The last batch in each shard may be smaller than N (no divisibility check). For triplet-respecting use cases (e.g. DM output min1/TS/min2), pick N as a multiple of 3 so triplets stay intact. No optimizer, no temp log/traj files, no debug zips. Output goes to `SinglePoint_trajes/collected_sp_rank_{rank}.traj` (traj input) or `SinglePoint_lmdbs/collected_sp_rank_{rank}.aselmdb` (lmdb input). LMDB output preserves the source row's `key_value_pairs` and `data` (`info` + `traj_path`) verbatim and populates `row.energy` / `row.forces` via `SinglePointCalculator`. Does **not** call `atoms.wrap()` — the structure is untouched, only E/F are added. v1: FAIRChem only; LMDB input restricted to `run_jobs = remaining`.
 
 ### `tools.py` - Utilities
 - `load_and_sanitize(traj, i, j)`: Loads atoms and stashes original `.info` into `atoms.info = {"orig_info": <original_info>}`. Prevents per-atom array data from causing size mismatches on atom add/remove. Called in `__main__.py` for all methods.
@@ -212,8 +214,9 @@ Standalone scripts for preparing NEB inputs. Currently `create_endpoints_for_MP_
 ```ini
 [Main]
 executorlib = True          # Use FluxJobExecutor (True) or serial mode (False)
-method = NEB                # NEB | Dimer | Minimization | DoubleMinimization
-dir_path = /path/to/trajs   # Directory containing .traj input files
+method = NEB                # NEB | Dimer | Minimization | DoubleMinimization | SinglePoint
+dir_path = /path/to/trajs   # Directory containing .traj (or .aselmdb if input_format=lmdb) input files
+input_format = traj         # traj (default) | lmdb. lmdb only supported for method=SinglePoint.
 Optimizer = MDMin           # MDMin | BFGS | LBFGS | FIRE (NEB band optimizer)
 fmax = 0.05                 # Force convergence (eV/Å)
 steps = 6000                # Max optimization steps
@@ -228,7 +231,7 @@ restart_limit = 3           # executorlib: max worker restarts (0 = no restarts)
 
 [FAIRChemCalculator]
 device = cuda
-name_or_path = uma-s-1p1
+name_or_path = uma-s-1p2
 task_name = oc20
 
 [Vasp]                             # INCAR params (for both Vasp and VaspInteractive)
@@ -300,6 +303,9 @@ relax_cell = False
 [ourDoubleMinimization]
 relax_cell = False
 pre_dimer_refine = False   # Rotation-only dimer to refine eigenmode before displacement (requires [DimerControl])
+
+[ourSinglePoint]
+frames_per_job = 1   # 1 (default) | 3. With 3, each executorlib job processes a triplet (e.g. DM min1/TS/min2) in a single batched FAIRChem forward pass; writes 3 frames contiguously in input order.
 ```
 
 ### `run_jobs` — Flexible Job Selection
@@ -410,6 +416,14 @@ NEB output image metadata: `src_index`, `image_idx`, `subband_idx`, `image_type`
 Dimer output: `eigenmode`, `curvature`, `converged`, `src_index`, `attempt_id`, `stoprun`, `selected_index`, `reaction_type`, `status`, `task_name`, `orig_info`.
 
 DoubleMinimization output: `side` (-1/0/1), `parent_ts_index`, `converged`, `src_index`, full reaction-detection dict (`is_reaction`, `n_formed_bonds`, `n_broken_bonds`, `broken_bonds`, `formed_bonds`, plus `is_ads_reaction` / `n_ads_*` / `ads_*_bonds` for OC inputs), `status` (`converged` / `converged_desorption_skipped` / `not_converged`; TS frame always `converged`), `task_name`, optional `curvature` on the TS frame when `pre_dimer_refine=True`, `orig_info`. CSV: 2 lines per job `{job_id},{rank},{side_id},{parent_ts_idx},"{status}"`.
+
+For method `SinglePoint`:
+```
+SinglePoint_status_csvs/status_rank_*.csv          # job_id,rank,status (one line per job; triplets log once)
+SinglePoint_trajes/collected_sp_rank_*.traj        # only when input_format=traj
+SinglePoint_lmdbs/collected_sp_rank_*.aselmdb      # only when input_format=lmdb
+```
+SP creates only the output directory matching the active `input_format` (plus `_status_csvs/`). No `_debug_zips/`. SP output frames carry `src_index`, `status` (always `converged` on success), `task_name`, `orig_info` (for .traj input via `load_and_sanitize`). For LMDB input, each output row mirrors the source row's `key_value_pairs` and `data` (`info` + `traj_path`) verbatim, with `row.energy` / `row.forces` newly populated via `SinglePointCalculator` on the atoms object — i.e. byte-equivalent to a fresh `build_lmdb_parallel.py` run on E/F-bearing trajectories. With `frames_per_job = 3`, the three frames of each triplet are evaluated in one batched FAIRChem forward pass and written contiguously in input order to the same rank shard.
 
 ## Execution Modes
 

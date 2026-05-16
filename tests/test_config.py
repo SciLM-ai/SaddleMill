@@ -239,7 +239,7 @@ class TestConfigManager:
         ini.write_text(textwrap.dedent("""\
             [FAIRChemCalculator]
             device = cuda
-            name_or_path = uma-s-1p1
+            name_or_path = uma-s-1p2
         """))
         cm = ConfigManager(str(ini))
         captured = capsys.readouterr()

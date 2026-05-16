@@ -65,7 +65,7 @@ def make_config_dict(method="Minimization", **overrides):
     config.setdefault("BFGS", {"maxstep": 0.1})
     config.setdefault("FIRE", {})
     config.setdefault("FAIRChemCalculator", {
-        "device": "cuda", "name_or_path": "uma-s-1p1", "task_name": "oc20",
+        "device": "cuda", "name_or_path": "uma-s-1p2", "task_name": "oc20",
     })
 
     # Route overrides to the appropriate section
@@ -177,7 +177,7 @@ def fairchem_calc():
     from fairchem.core import FAIRChemCalculator
     calc = FAIRChemCalculator.from_model_checkpoint(
         device="cuda",
-        name_or_path="uma-s-1p1",
+        name_or_path="uma-s-1p2",
         task_name="oc20",
     )
     return calc

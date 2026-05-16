@@ -297,3 +297,86 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                 for f_name in existing_files:
                     os.remove(f_name)
 
+
+def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
+                executorlib_worker_id=None, **kwargs):
+    """Single-point energy/force calculation. Writes results to traj or LMDB.
+
+    With frames_per_job>1, `atoms` arrives as a list of frames and all of them
+    are fused into one batched FAIRChem forward pass, then written in input
+    order to the same rank shard.
+    """
+    rank = executorlib_worker_id
+
+    max_consecutive_errors = config_dict["Main"]["max_consecutive_errors"]
+    if consecutive_errors is not None and consecutive_errors[0] >= max_consecutive_errors > 0:
+        print(f"Rank {rank}: {consecutive_errors[0]} consecutive structures errored. "
+              f"Killing worker for restart.", flush=True)
+        backup_flux_logs(rank)
+        sys.exit(1)
+
+    method_name = config_dict["Main"]["method"]   # "SinglePoint"
+    input_format = config_dict["Main"]["input_format"]
+    status_file = f"{method_name}_status_csvs/status_rank_{rank}.csv"
+    task_name = get_task_name(config_dict)
+
+    frames = atoms if isinstance(atoms, list) else [atoms]
+    extras = kwargs.get('extras') or [{} for _ in frames]
+
+    def log_status(status_msg):
+        with open(status_file, 'a') as f:
+            f.write(f'{i},{rank},"{status_msg}"\n')
+
+    try:
+        if len(frames) > 1:
+            # Single batched FAIRChem forward pass for all frames.
+            # Pattern from catsunami/ocpneb.py:168-175. Frames may have different
+            # natoms (different parent structures in the same batch) — slice the
+            # concatenated forces by per-frame natoms.
+            import numpy as _np
+            from fairchem.core.datasets.atomic_data import atomicdata_list_to_batch
+            data_list = [calc.a2g(a) for a in frames]
+            batch = atomicdata_list_to_batch(data_list)
+            preds = calc.predictor.predict(batch)
+            energies = preds["energy"].detach().cpu().flatten().tolist()
+            forces_flat = preds["forces"].detach().cpu().numpy()
+            offsets = _np.cumsum([0] + [len(a) for a in frames])
+            ef_pairs = [(energies[k], forces_flat[offsets[k]:offsets[k+1]])
+                        for k in range(len(frames))]
+        else:
+            a = frames[0]
+            a.calc = calc
+            ef_pairs = [(a.get_potential_energy(), a.get_forces())]
+
+        if input_format == "lmdb":
+            import fairchem.core.datasets  # noqa: F401  (register aselmdb backend)
+            from ase.db import connect
+            out_path = f"{method_name}_lmdbs/collected_sp_rank_{rank}.aselmdb"
+            with connect(out_path, type='aselmdb') as db:
+                for a, (e, f_arr), extra in zip(frames, ef_pairs, extras):
+                    a.info['src_index'] = i
+                    a.info['status'] = 'converged'
+                    a.info['task_name'] = task_name
+                    a.calc = SinglePointCalculator(a, energy=e, forces=f_arr)
+                    db.write(a, **(extra.get('kvp') or {}),
+                             data=(extra.get('row_data') or {}))
+        else:
+            out_path = f"{method_name}_trajes/collected_sp_rank_{rank}.traj"
+            with Trajectory(out_path, 'a') as writer:
+                for a, (e, f_arr) in zip(frames, ef_pairs):
+                    a.info['src_index'] = i
+                    a.info['status'] = 'converged'
+                    a.info['task_name'] = task_name
+                    a.calc = SinglePointCalculator(a, energy=e, forces=f_arr)
+                    writer.write(a)
+
+        log_status("converged")
+        if consecutive_errors is not None:
+            consecutive_errors[0] = 0
+
+    except Exception as e:
+        print(f"Rank {rank} FAILED on structure {i}: {e}", flush=True)
+        print(f"\nTraceback details:\n{traceback.format_exc()}", flush=True)
+        if consecutive_errors is not None:
+            consecutive_errors[0] += 1
+        log_status(f"error: {str(e)}")

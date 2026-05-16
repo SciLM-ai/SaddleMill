@@ -24,7 +24,7 @@ steps = 10
 
 [FAIRChemCalculator]
 device = cuda
-name_or_path = uma-s-1p1
+name_or_path = uma-s-1p2
 task_name = oc20
 
 [MDMin]
@@ -94,7 +94,7 @@ steps = 10
 
 [FAIRChemCalculator]
 device = cuda
-name_or_path = uma-s-1p1
+name_or_path = uma-s-1p2
 task_name = oc20
 
 [MDMin]

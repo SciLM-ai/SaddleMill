@@ -26,9 +26,13 @@ class ConfigManager:
             "zip": True,
             "max_consecutive_errors": 5,
             "restart_limit": 3,
+            "input_format": "traj",  # traj (default) | lmdb. lmdb is only supported for method=SinglePoint.
         },
         "ourMinimization": {
             "relax_cell": False,
+        },
+        "ourSinglePoint": {
+            "frames_per_job": 1,  # 1 (default) | 3. With 3, each executorlib job processes a triplet (e.g. DM min1/TS/min2) in a single batched FAIRChem forward pass.
         },
         "ourDoubleMinimization": {
             "relax_cell": False,
@@ -224,6 +228,32 @@ def load_method(config_dict):
     method_name = config_dict["Main"]["method"]
     if method_name is None:
         raise ValueError("Configuration error: 'Main' -> 'method' is not set. Please specify a method (e.g., 'minimization') in config.ini")
+
+    input_format = config_dict["Main"].get("input_format", "traj")
+    if input_format not in ("traj", "lmdb"):
+        raise ValueError(f"Unknown input_format={input_format!r}; expected 'traj' or 'lmdb'.")
+    if input_format == "lmdb" and method_name != "SinglePoint":
+        raise ValueError(
+            f"input_format='lmdb' is only supported for method='SinglePoint'; got method={method_name!r}."
+        )
+
+    if method_name == "SinglePoint":
+        calc_name = config_dict["Main"]["Calculator"]
+        if calc_name != "FAIRChemCalculator":
+            raise NotImplementedError(
+                f"method='SinglePoint' currently supports only FAIRChemCalculator; got Calculator={calc_name!r}."
+            )
+        # v1: LMDB output cleaning is not implemented; restrict resume categories.
+        if input_format == "lmdb":
+            cats = _normalize_run_jobs(config_dict["Main"]["run_jobs"])
+            if cats != {"remaining"}:
+                raise NotImplementedError(
+                    "v1: SinglePoint with input_format='lmdb' supports only "
+                    "run_jobs='remaining' (the default). To re-process specific "
+                    "categories, delete SinglePoint_lmdbs/ and "
+                    "SinglePoint_status_csvs/ first."
+                )
+
     if method_name == "NEB":
         from saddlemill.nebopt import nebopt as method
     elif method_name == "Dimer":
@@ -232,9 +262,11 @@ def load_method(config_dict):
         from saddlemill.geomopt import geomopt as method
     elif method_name == "DoubleMinimization":
         from saddlemill.geomopt import doublegeomopt as method
+    elif method_name == "SinglePoint":
+        from saddlemill.geomopt import singlepoint as method
     else:
         raise NotImplementedError(
-            f"Method '{method_name}' is not implemented. Only NEB, Dimer, Minimization, and DoubleMinimization are supported."
+            f"Method '{method_name}' is not implemented. Only NEB, Dimer, Minimization, DoubleMinimization, and SinglePoint are supported."
         )
     return method
 
@@ -267,23 +299,50 @@ def load_optimizer(config_dict):
 
 
 def get_trajes_and_indices(config_dict):
-    
+
     main_cfg = config_dict.get("Main", {})
     dir_path = os.path.expandvars(os.path.expanduser(main_cfg.get("dir_path", ".")))
+    input_format = main_cfg.get("input_format", "traj")
+    method_name = main_cfg.get("method")
+
+    if input_format == "lmdb":
+        # LMDB inputs are only supported for SinglePoint (enforced in load_method).
+        # fairchem.core.datasets must be imported so ase.db recognizes the aselmdb backend.
+        import fairchem.core.datasets  # noqa: F401
+        from ase.db import connect
+
+        fpj = config_dict["ourSinglePoint"].get("frames_per_job", 1)
+        input_pattern = os.path.join(dir_path, "**", "*.aselmdb")
+        all_lmdb_files = sorted(glob.glob(input_pattern, recursive=True))
+
+        trajes_and_idxs = []
+        for lmdb_path in all_lmdb_files:
+            db = connect(lmdb_path, type='aselmdb', readonly=True)
+            n_rows = db.count()
+            # ASE LMDB ids are 1-indexed and dense. The last chunk may be smaller
+            # than fpj — user is responsible for choosing fpj that keeps the
+            # leftover meaningful for their use case (e.g. multiple of 3 for triplets).
+            for start in range(1, n_rows + 1, fpj):
+                end = min(start + fpj, n_rows + 1)
+                trajes_and_idxs.append([lmdb_path, start, end])
+        return trajes_and_idxs
+
     input_pattern = os.path.join(dir_path, "**", "*.traj")
     all_traj_files = sorted(glob.glob(input_pattern, recursive=True))
-    
+
     if config_dict["ourNEB"]["images_location_in_input_traj"] in (":", -1):
         traj_lens = []
         for traj_name in all_traj_files:
             with Trajectory(traj_name, 'r') as traj:
                 traj_lens.append(len(traj))
 
-    if config_dict["Main"]["method"] == "NEB":
+    if method_name == "NEB":
         if config_dict["ourNEB"]["only_endpoints_in_input_traj"]:
             nimages = 2
         else:
             nimages = config_dict["ourNEB"]["num_frames"]
+    elif method_name == "SinglePoint":
+        nimages = config_dict["ourSinglePoint"].get("frames_per_job", 1)
     else:
         nimages = 1
 
@@ -295,16 +354,28 @@ def get_trajes_and_indices(config_dict):
             trajes_and_idxs.append([traj_name, traj_lens[i]-nimages, traj_lens[i]])
         elif config_dict["ourNEB"]["images_location_in_input_traj"] == ":":
             traj_len = traj_lens[i]
-            if traj_len%nimages != 0: raise ValueError(f"Can't divide a traj file with {traj_len} atoms objects into batches of {nimages} atoms objects")
-            for j in range(traj_len//nimages):
-                trajes_and_idxs.append([traj_name, j*nimages, (j+1)*nimages])
-    
+            if method_name == "SinglePoint":
+                # SP: allow a smaller final batch.
+                for start in range(0, traj_len, nimages):
+                    trajes_and_idxs.append([traj_name, start, min(start + nimages, traj_len)])
+            else:
+                if traj_len%nimages != 0: raise ValueError(f"Can't divide a traj file with {traj_len} atoms objects into batches of {nimages} atoms objects")
+                for j in range(traj_len//nimages):
+                    trajes_and_idxs.append([traj_name, j*nimages, (j+1)*nimages])
+
     return trajes_and_idxs
 
 
 def create_results_directories(config_dict):
     method_name = config_dict["Main"]["method"]
-    dirs = [f"{method_name}_status_csvs", f"{method_name}_trajes", f"{method_name}_debug_zips"]
+    dirs = [f"{method_name}_status_csvs"]
+    if method_name == "SinglePoint":
+        # SP has no debug/log machinery; only the format-matching output dir.
+        input_format = config_dict["Main"].get("input_format", "traj")
+        out_subdir = "lmdbs" if input_format == "lmdb" else "trajes"
+        dirs.append(f"{method_name}_{out_subdir}")
+    else:
+        dirs.extend([f"{method_name}_trajes", f"{method_name}_debug_zips"])
     for d in dirs:
         pathlib.Path(d).mkdir(exist_ok=False)
 
@@ -462,6 +533,7 @@ def _get_subunit_config(method_name):
         return 2, "subband_idx"
     elif method_name == "DoubleMinimization":
         return 2, "side"
+    # Minimization and SinglePoint have no sub-units.
     return None, None
 
 
