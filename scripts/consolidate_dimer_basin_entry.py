@@ -1,35 +1,57 @@
-"""Consolidate the first frame of every converged Dimer attempt into per-rank trajs.
+"""Consolidate the entry point of each converged Dimer attempt's final
+negative-curvature stretch into per-rank trajs.
 
-Run from a project root that contains Dimer_debug_zips/ and Dimer_status_csvs/.
+Usage
+-----
+Run from a project root that contains Dimer_debug_zips/ and Dimer_status_csvs/:
+
+    python scripts/consolidate_dimer_basin_entry.py [--ranks R [R ...]] \\
+            [--output-dir OUT] [-j WORKERS]
+
+Defaults: all ranks discovered from Dimer_status_csvs/, output dir
+`dimer_basin_entry/`, workers = `len(os.sched_getaffinity(0))`.
 
 Inputs
 ------
 - Dimer_debug_zips/structure_rank_<R>_data.zip : per-rank zip of
-  dimer_<src_index>_<attempt_id>_<atom_index>.traj files (and .log files,
-  occasionally ERROR_dimer_*.traj for crashed attempts — both ignored).
+  dimer_<src>_<attempt>_<atom>.traj files and dimer_opt_<src>_<attempt>_<atom>.log
+  files (plus dimer_control_*.log, occasionally ERROR_dimer_*.traj for
+  crashed attempts — all ignored).
 - Dimer_status_csvs/status_rank_<R>.csv : per-rank rows
   `src_index, mpi_rank, attempt_id, atom_index, status` (no header).
 
 Logic
 -----
 Iterate CSV rows. For rows whose status passes the filter
-(`startswith("converged") and != "converged_to_desorption"`), construct the
-expected filename `dimer_<src>_<attempt>_<atom>.traj` and read it from the
-matching zip. The (src, attempt, atom) check is implicit in the filename
-lookup. If a converged row's traj is absent, log it and continue; missing
-trajs are summarized at the end.
+(`startswith("converged") and != "converged_to_desorption"`), read the
+matching `dimer_opt_<src>_<attempt>_<atom>.log` to get the per-step curvature
+trace, find the first step of the **last contiguous negative-curvature
+stretch** ending at the final step (strict curv < 0), and emit that frame
+from `dimer_<src>_<attempt>_<atom>.traj` (frame index = optimizer step).
+
+Walking back from the converged saddle keeps only frames that never lost
+the saddle-like mode after they were visited, so the chosen frame is the
+earliest reliable structure in the trajectory connected to the converged TS.
+
+Rows are skipped (and listed in the missing summary) when the log is absent,
+when the final step's curvature is not negative (the converged saddle's
+basin assumption fails), or when the traj is empty.
 
 Output
 ------
-<output-dir>/dimer_init_displaced_rank_<R>.traj — one ASE trajectory per
-input rank, each containing the **first frame** of every kept attempt's
-traj (i.e., the initial displaced structure fed into Dimer). All per-rank
-files in the same directory together form the consolidated set.
+<output-dir>/dimer_basin_entry_rank_<R>.traj — one ASE trajectory per
+input rank, each containing the entry-point frame of every kept attempt.
+All per-rank files in the same directory together form the consolidated set.
 
 Every output frame's `atoms.info` carries:
     status     : str  — "converged" or "converged_after_extension"
     src_index  : int  — Dimer source-structure id
     attempt_id : int  — Dimer attempt id within that source
+    atom_index : int  — dimer-selected atom id (from CSV; completes the
+                        debug-zip filename `dimer_<src>_<attempt>_<atom>.traj`)
+    mpi_rank   : int  — source `structure_rank_<R>_data.zip` rank id
+    dimer_step : int  — optimizer step the frame was picked from, equal to
+                        the frame index in the source `.traj`
 
 Parallelism
 -----------
@@ -42,14 +64,14 @@ Downstream workflow (context for future scripts)
 ------------------------------------------------
 The output of this script is intended to be fed into a SaddleMill `Minimization`
 run. Separately, a SaddleMill `DoubleMinimization` run is performed starting from
-the converged Dimer TS outputs (which were produced from these same initial
-displaced structures). A future comparison script will join the
-minimization-of-init-displaced result against the DoubleMinimization endpoints
-by `(src_index, attempt_id)` and check whether the minimized init-displaced
-structure matches either of the two double-min endpoints (connectivity
-comparison via saddlemill.tools.check_reaction). Both sides of that join carry
-`src_index` and `attempt_id`: this script writes them by construction, and
-DoubleMinimization output preserves them through the SaddleMill pipeline.
+the converged Dimer TS outputs (which came from the same attempts). A future
+comparison script will join the basin-entry-minimization result against the
+DoubleMinimization endpoints by `(src_index, attempt_id)` and check whether
+the minimized basin-entry structure matches either of the two double-min
+endpoints (connectivity comparison via saddlemill.tools.check_reaction). Both
+sides of that join carry `src_index` and `attempt_id`: this script writes them
+by construction, and DoubleMinimization output preserves them through the
+SaddleMill pipeline.
 """
 import argparse
 import csv
@@ -67,10 +89,61 @@ from ase.io import Trajectory
 
 CSV_DIR = "Dimer_status_csvs"
 ZIP_DIR = "Dimer_debug_zips"
-DEFAULT_OUT_DIR = "dimer_init_displaced"
-OUT_NAME_FMT = "dimer_init_displaced_rank_{rank}.traj"
+DEFAULT_OUT_DIR = "dimer_basin_entry"
+OUT_NAME_FMT = "dimer_basin_entry_rank_{rank}.traj"
 
 RANK_RE = re.compile(r"^status_rank_(\d+)\.csv$")
+LOG_PREFIX = "MinModeTranslate:"
+
+
+def _parse_curvatures(log_text):
+    """Return deduped [(step, curvature), ...] sorted by step.
+
+    Reads `MinModeTranslate:` lines from a dimer optimizer log. Each step may
+    emit two lines (one pre-translation with STEPSIZE='--------', one post);
+    both carry the same curvature, so we keep the first value seen per step.
+    The header line ("STEP TIME ENERGY ...") is skipped because its STEP field
+    is not numeric.
+    """
+    per_step = {}
+    for line in log_text.splitlines():
+        line = line.strip()
+        if not line.startswith(LOG_PREFIX):
+            continue
+        parts = line[len(LOG_PREFIX):].split()
+        # Expected: STEP TIME ENERGY MAX-FORCE STEPSIZE CURVATURE ROT-STEPS
+        if len(parts) < 6:
+            continue
+        try:
+            step = int(parts[0])
+        except ValueError:
+            continue
+        try:
+            curv = float(parts[5])
+        except ValueError:
+            continue
+        if step not in per_step:
+            per_step[step] = curv
+    return sorted(per_step.items())
+
+
+def _first_step_of_last_neg_stretch(curvatures):
+    """First step of the last contiguous all-negative run.
+
+    Walks back from the last step. Returns None if the list is empty or the
+    last step's curvature is >= 0 (strict < 0 cutoff).
+    """
+    if not curvatures:
+        return None
+    if curvatures[-1][1] >= 0:
+        return None
+    first_neg_step = curvatures[-1][0]
+    for step, curv in reversed(curvatures[:-1]):
+        if curv < 0:
+            first_neg_step = step
+        else:
+            break
+    return first_neg_step
 
 
 def discover_ranks():
@@ -129,12 +202,35 @@ def process_rank(rank, out_path):
                         continue
                     n_kept_rows += 1
                     traj_name = f"dimer_{src}_{attempt}_{atom}.traj"
+                    log_name = f"dimer_opt_{src}_{attempt}_{atom}.log"
                     if traj_name not in names_in_zip:
                         log_lines.append(
                             f"  MISSING rank {rank} {csv_path}:{i} -> {traj_name} "
                             f"(status={status})"
                         )
                         missing.append((rank, traj_name, status))
+                        continue
+                    if log_name not in names_in_zip:
+                        log_lines.append(
+                            f"  MISSING rank {rank} {csv_path}:{i} -> {log_name} "
+                            f"(status={status})"
+                        )
+                        missing.append((rank, log_name, status + " [missing log]"))
+                        continue
+                    log_text = zf.read(log_name).decode("utf-8", errors="replace")
+                    curvatures = _parse_curvatures(log_text)
+                    first_neg_step = _first_step_of_last_neg_stretch(curvatures)
+                    if first_neg_step is None:
+                        reason = (
+                            "no curvature lines in log"
+                            if not curvatures
+                            else "final step curvature not negative"
+                        )
+                        log_lines.append(
+                            f"  SKIP rank {rank} {log_name} ({reason}) "
+                            f"(status={status})"
+                        )
+                        missing.append((rank, log_name, status + f" [{reason}]"))
                         continue
                     with open(tmp_path, "wb") as f_tmp:
                         f_tmp.write(zf.read(traj_name))
@@ -146,10 +242,30 @@ def process_rank(rank, out_path):
                             )
                             missing.append((rank, traj_name, status + " [empty traj]"))
                             continue
-                        atoms = t[0]
+                        expected_len = curvatures[-1][0] + 1
+                        if len(t) != expected_len:
+                            log_lines.append(
+                                f"  MISMATCH rank {rank} {traj_name}: "
+                                f"len(traj)={len(t)} vs max_step+1={expected_len} "
+                                f"(status={status})"
+                            )
+                        if first_neg_step >= len(t):
+                            log_lines.append(
+                                f"  SKIP rank {rank} {traj_name}: "
+                                f"first_neg_step={first_neg_step} out of range "
+                                f"(len(traj)={len(t)}) (status={status})"
+                            )
+                            missing.append(
+                                (rank, traj_name, status + " [step out of range]")
+                            )
+                            continue
+                        atoms = t[first_neg_step]
                     atoms.info["status"] = status
                     atoms.info["src_index"] = src
                     atoms.info["attempt_id"] = attempt
+                    atoms.info["atom_index"] = atom
+                    atoms.info["mpi_rank"] = rank
+                    atoms.info["dimer_step"] = first_neg_step
                     out_traj.write(atoms)
                     kept += 1
     finally:
