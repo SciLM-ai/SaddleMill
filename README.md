@@ -249,6 +249,60 @@ reaction_types = initial_guess
 
 This is different from `continue_from_result`, which is an automatic mechanism for continuing a previous SaddleMill run. Use `initial_guess` when bringing a TS from outside SaddleMill; `continue_from_result` handles the "pick up where I left off" case internally.
 
+### VASP input generation (`input_generator`)
+
+By default the `[Vasp]` section *is* your INCAR — every tag you list there is written to the calculator. When you want a standard input recipe (e.g. OMat24 or OC20) instead of hand-writing every tag, set `input_generator` in the `[ourVasp]` section. (`[ourVasp]` holds SaddleMill's VASP-input knobs; `[Vasp]` stays a pure ASE pass-through.) It works for **all methods** (NEB, Dimer, Minimization, DoubleMinimization, SinglePoint).
+
+```ini
+[ourVasp]
+input_generator = omat24_static   # omat24_static | omat24_relax | oc20
+                                  #   ...or 'my_pkg.my_module:my_func'
+                                  #   ...or '/path/to/my_inputs.py:my_func'
+
+[Vasp]
+encut = 600                       # any [Vasp] tag overrides the generator
+pp = PBE
+xc = PBE
+```
+
+Per-tag precedence is **`[Vasp]` key → `input_generator` output → ASE/VASP default**: a tag you set in `[Vasp]` always wins; a tag the generator supplies is used when `[Vasp]` is silent; a tag in neither falls back to ASE's default. The generator contributes only electronic/accuracy settings — ionic-driver tags (`IBRION`/`NSW`/`POTIM`/`EDIFFG`) are stripped, since SaddleMill drives the geometry through ASE.
+
+A custom generator is any function `generator(atoms) -> dict` returning ASE-`Vasp` kwargs (lowercased INCAR tags plus `kpts`/`gamma`/`setups`/`magmom`); point `input_generator` at it as `module:func` or `file.py:func`. The built-ins need `fairchem-data-omat` (`omat24_*`) or `fairchem-data-oc` (`oc20`) installed (see Installation above).
+
+### Extra input files (`extra_input_files`), e.g. VTST MODECAR
+
+`input_generator` only sets INCAR/k-points/POTCAR. To drop **extra files** into the VASP working directory — most usefully a VTST `MODECAR` (initial dimer mode) — use `extra_input_files`:
+
+```ini
+[ourVasp]
+extra_input_files = modecar       # built-in | 'module:func' | 'file.py:func' | space-separated list
+```
+
+The built-in `modecar` builds the file from `atoms.info['eigenmode']` (the same eigenmode NEB/Dimer/DoubleMinimization already stamp on their output frames), reordered to POSCAR order. A custom writer is any `writer(calc, atoms, directory) -> None` (it receives the calculator, so it can use `calc.sort`).
+
+Symmetrically, **`extra_outputs`** parses files back *out* of the VASP directory after the run and merges the result into the output frame's `.info`. A parser is any `parser(calc, atoms, directory) -> dict`; the built-in `vtst_dimer` returns `eigenmode` (from `NEWMODECAR`, mapped back to atoms order via `calc.resort`) and `curvature` (from `DIMCAR`).
+
+Together these enable a **VASP-internal VTST dimer driven by SaddleMill as a pure launcher**:
+
+```ini
+[ourVasp]
+input_generator   = omat24_static   # base INCAR recipe
+extra_input_files = modecar         # write MODECAR from each frame's eigenmode
+extra_outputs     = vtst_dimer      # read NEWMODECAR/DIMCAR -> eigenmode/curvature onto output
+
+[Vasp]                              # VTST dimer driver tags (plain pass-through)
+ichain = 2
+ibrion = 3
+potim = 0
+iopt = 3                            # QuickMin: force-driven step, no fixed jump
+maxmove = 0.1
+ddr = 0.005
+nsw = 300
+ediffg = -0.03
+```
+
+with `method = SinglePoint`, `Calculator = Vasp`. SaddleMill runs one VASP call per structure, VASP runs the whole dimer internally, and the converged saddle (geometry + E/F) **plus** the refined `eigenmode`/`curvature` are written to the output traj. Use plain `Vasp` (not `VaspInteractive`, which forces `ibrion = -1`). The input frames must carry `atoms.info['eigenmode']` (e.g. NEB-CI / Dimer / DoubleMinimization outputs).
+
 ## Testing
 
 Install test dependencies:

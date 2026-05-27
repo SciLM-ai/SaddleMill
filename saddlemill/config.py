@@ -90,6 +90,13 @@ class ConfigManager:
             "vasp_command": None,
             "vasp_ncore": None,
         },
+        # SaddleMill-side VASP-input orchestration (the [Vasp] section itself is a
+        # pure pass-through to ASE's Vasp calculator and never holds our keys).
+        "ourVasp": {
+            "input_generator": None,    # built-in (omat24_static|omat24_relax|oc20) | module:func | file.py:func
+            "extra_input_files": None,  # built-in (modecar) | module:func | file.py:func | space-separated list
+            "extra_outputs": None,      # built-in (vtst_dimer) | module:func | file.py:func | space-separated list
+        },
     }
 
     def __init__(self, config_file="config.ini"):
@@ -289,6 +296,26 @@ def load_method(config_dict):
                 f"to be set. Add them to config.ini (the launcher command for VASP, "
                 f"e.g. 'mpirun -n 64 vasp_std')."
             )
+        # Fail fast on unresolvable [ourVasp] input_generator / extra_input_files
+        # (built-in name, 'module:func', or 'file.py:func'). Resolved, not called.
+        gen_spec = config_dict.get("ourVasp", {}).get("input_generator")
+        if gen_spec:
+            from saddlemill.vasp_input_generators import load_input_generator
+            load_input_generator(gen_spec)
+        extra_spec = config_dict.get("ourVasp", {}).get("extra_input_files")
+        if extra_spec:
+            from saddlemill.vasp_input_generators import load_extra_input_writer
+            for s in ([extra_spec] if isinstance(extra_spec, str) else extra_spec):
+                load_extra_input_writer(s)
+        out_spec = config_dict.get("ourVasp", {}).get("extra_outputs")
+        if out_spec:
+            from saddlemill.vasp_input_generators import load_extra_output_parser
+            for s in ([out_spec] if isinstance(out_spec, str) else out_spec):
+                load_extra_output_parser(s)
+    elif any(config_dict.get("ourVasp", {}).get(k) for k in
+             ("input_generator", "extra_input_files", "extra_outputs")):
+        print(f"Warning: [ourVasp] settings are set but Calculator={calc_name!r} "
+              f"is not VASP; they will be ignored.")
 
     if method_name == "NEB":
         from saddlemill.nebopt import nebopt as method

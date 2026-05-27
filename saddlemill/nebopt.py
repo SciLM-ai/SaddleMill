@@ -15,7 +15,8 @@ from ase.mep.neb import NEB, NEBTools, NEBState
 from saddlemill.catsunami.ocpneb import OCPNEB, _find_segment_ci
 from saddlemill.dimeropt import _setup_dimer
 from saddlemill.tools import (backup_flux_logs, get_task_name, remove_vasp_heavies,
-                              finalize_if_vasp_interactive)
+                              finalize_if_vasp_interactive, vasp_incar_kwargs,
+                              resolve_vasp_calc_class)
 
 
 def _expand_band(neb, fmax_threshold, max_num_frames, num_frames, calc):
@@ -252,16 +253,20 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
         need_interpolation = default_interp and num_images <= 2
 
         def _build_neb_vasp_calc(image_idx, role):
-            """role: 'endpoints' or 'intermediates' — picks command/ncore keys."""
+            """role: 'endpoints' or 'intermediates' — picks command/ncore keys.
+
+            INCAR/k-points/setups come from `vasp_incar_kwargs` (the [Vasp] section
+            plus an optional per-image `input_generator`), evaluated on this image.
+            """
             kwargs = {
                 "directory": f"VASP_{i}_{image_idx}",
                 "command": config_dict["ourNEB"][f"vasp_command_{role}"],
-                **config_dict["Vasp"],
+                **vasp_incar_kwargs(config_dict, images[image_idx]),
             }
             ncore = config_dict["ourNEB"][f"vasp_ncore_{role}"]
             if ncore is not None:
                 kwargs["ncore"] = int(ncore)
-            return calc(**kwargs)
+            return resolve_vasp_calc_class(config_dict, calc)(**kwargs)
 
         reactant = images[0]
         if config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"):
@@ -386,7 +391,16 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
         if add_images_step > 0 and can_add_images:
             events.append((add_images_step, 'add_images'))
         if imin_check_step > 0:
-            events.append((imin_check_step, 'imin'))
+            if is_vasp:
+                # Imin *detection* (_detect_imin/_relax_imin) is FAIRChem-only:
+                # _relax_imin assigns the shared `calc` (the VASP *class*, not a
+                # per-image instance) to an image, which can't evaluate. Seeded
+                # imin from a continuation still work in VASP mode (OCPNEB handles
+                # initial_imin_set), so only on-the-fly detection is skipped here.
+                print(f"Rank {rank}, structure {i}: intermediate_minima_check_step "
+                      f"is FAIRChem-only; ignoring for VASP/VaspInteractive.", flush=True)
+            else:
+                events.append((imin_check_step, 'imin'))
         events.sort()
 
         converged = False

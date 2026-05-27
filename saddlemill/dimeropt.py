@@ -147,7 +147,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                 if eigenmode is not None:
                     eigenmode = np.array(eigenmode)
 
-                attempt_calc = resolve_vasp_calc(config_dict, calc, i, attempt, "ourDimer")
+                attempt_calc = resolve_vasp_calc(config_dict, calc, i, attempt, "ourDimer", atoms=atoms)
                 d_atoms, dim_rlx = _setup_dimer(
                     atoms, attempt_calc, eigenmode=eigenmode,
                     displacement_dict=displacement_dict,

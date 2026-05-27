@@ -71,24 +71,100 @@ def get_task_name(config_dict):
 #==============================================================================
 ### VASP HELPERS
 
-def resolve_vasp_calc(config_dict, calc, i, subunit_id, section):
+def vasp_incar_kwargs(config_dict, atoms=None):
+    """Return the INCAR/k-point/setup kwargs for a VASP calculator.
+
+    Starts from an optional ``[ourVasp] input_generator`` (built-in name, dotted
+    ``module:func``, or ``file.py:func``) evaluated on ``atoms``, then layers the
+    explicit ``[Vasp]`` section keys on top so the user's ``[Vasp]`` always wins.
+    With no generator (or no ``atoms``), this is just the ``[Vasp]`` section.
+    ``[Vasp]`` is a pure pass-through to ASE's Vasp calculator; SaddleMill's own
+    knobs live in ``[ourVasp]`` and are never forwarded to the calculator.
+    """
+    vasp_section = dict(config_dict.get("Vasp", {}))
+    gen_spec = config_dict.get("ourVasp", {}).get("input_generator")
+    if gen_spec and atoms is not None:
+        from saddlemill.vasp_input_generators import load_input_generator
+        gen_kwargs = load_input_generator(gen_spec)(atoms)
+        return {**gen_kwargs, **vasp_section}  # [Vasp] keys override generator
+    return vasp_section
+
+
+def _with_extra_io(calc_cls, writers, parsers):
+    """Subclass *calc_cls* to run extra-input writers and extra-output parsers.
+
+    Writers ``(calc, atoms, directory) -> None`` run after ASE writes its inputs
+    (directory exists, ``calc.sort`` set) and before VASP runs — via ``write_input``.
+    Parsers ``(calc, atoms, directory) -> dict`` run after VASP finishes (directory
+    populated, ``calc.resort`` set) — via ``read_results`` — and their merged dict is
+    stashed on ``calc.sm_extra_outputs`` for the method to stamp onto output frames.
+    """
+    class _CalcWithExtraIO(calc_cls):
+        def write_input(self, atoms, *args, **kwargs):
+            super().write_input(atoms, *args, **kwargs)
+            directory = kwargs.get("directory", getattr(self, "directory", "."))
+            for writer in writers:
+                writer(self, atoms, directory)
+
+        def read_results(self):
+            super().read_results()
+            info = {}
+            directory = getattr(self, "directory", ".")
+            for parser in parsers:
+                info.update(parser(self, self.atoms, directory) or {})
+            self.sm_extra_outputs = info
+
+    _CalcWithExtraIO.__name__ = f"{calc_cls.__name__}WithExtraIO"
+    return _CalcWithExtraIO
+
+
+def resolve_vasp_calc_class(config_dict, calc):
+    """Return *calc*, wrapped for ``[ourVasp] extra_input_files`` / ``extra_outputs`` (if set).
+
+    No-op for FAIRChem or when neither key is set. Shared by ``resolve_vasp_calc``
+    and ``nebopt._build_neb_vasp_calc`` so the hooks are identical across all methods.
+    Each value is one spec or a space-separated list (built-in name, ``module:func``,
+    or ``file.py:func``). Output parsers leave their merged dict on
+    ``calc.sm_extra_outputs``; the method decides whether to stamp it onto frames.
+    """
+    if config_dict["Main"]["Calculator"] not in ("Vasp", "VaspInteractive"):
+        return calc
+    our_vasp = config_dict.get("ourVasp", {})
+    in_spec = our_vasp.get("extra_input_files")
+    out_spec = our_vasp.get("extra_outputs")
+    if not in_spec and not out_spec:
+        return calc
+    from saddlemill.vasp_input_generators import (load_extra_input_writer,
+                                                  load_extra_output_parser)
+    _aslist = lambda s: [s] if isinstance(s, str) else list(s)
+    writers = [load_extra_input_writer(s) for s in _aslist(in_spec)] if in_spec else []
+    parsers = [load_extra_output_parser(s) for s in _aslist(out_spec)] if out_spec else []
+    return _with_extra_io(calc, writers, parsers)
+
+
+def resolve_vasp_calc(config_dict, calc, i, subunit_id, section, atoms=None):
     """Return an instantiated calculator for this (job, subunit).
 
     For FAIRChem, returns the shared instance unchanged. For VASP/VaspInteractive,
     builds a fresh calculator pointing at ``VASP_{i}[_{subunit_id}]/`` with the
-    section's ``vasp_command`` / ``vasp_ncore`` and the global ``[Vasp]`` INCAR kwargs.
-    ``subunit_id=None`` produces ``VASP_{i}/`` (Minimization, SinglePoint).
+    section's ``vasp_command`` / ``vasp_ncore`` and the INCAR kwargs from
+    ``vasp_incar_kwargs`` (``[Vasp]`` plus an optional per-structure
+    ``[ourVasp] input_generator``). The class is first wrapped by
+    ``resolve_vasp_calc_class`` so ``[ourVasp] extra_input_files`` (e.g. a VTST
+    MODECAR) are written too.
+    ``subunit_id=None`` produces ``VASP_{i}/`` (Minimization, SinglePoint). Pass
+    ``atoms`` to enable ``input_generator`` and the extra-file writers.
     """
     if config_dict["Main"]["Calculator"] not in ("Vasp", "VaspInteractive"):
         return calc
     suffix = f"_{subunit_id}" if subunit_id is not None else ""
     kwargs = {"directory": f"VASP_{i}{suffix}",
               "command": config_dict[section]["vasp_command"],
-              **config_dict["Vasp"]}
+              **vasp_incar_kwargs(config_dict, atoms)}
     ncore = config_dict[section].get("vasp_ncore")
     if ncore is not None:
         kwargs["ncore"] = int(ncore)
-    return calc(**kwargs)
+    return resolve_vasp_calc_class(config_dict, calc)(**kwargs)
 
 
 def remove_vasp_heavies(dir_path):

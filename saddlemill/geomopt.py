@@ -34,7 +34,7 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
 
     method_name = config_dict["Main"]["method"]
     is_vasp = config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive")
-    vasp_calc = resolve_vasp_calc(config_dict, calc, i, None, "ourMinimization")
+    vasp_calc = resolve_vasp_calc(config_dict, calc, i, None, "ourMinimization", atoms=atoms)
     atoms.calc = vasp_calc
 
     status_file = f"{method_name}_status_csvs/status_rank_{rank}.csv"
@@ -112,7 +112,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
     method_name = config_dict["Main"]["method"]
     is_vasp = config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive")
     # TS-side calculator: used for TS E/F and optional pre_dimer_refine.
-    ts_calc = resolve_vasp_calc(config_dict, calc, i, 0 if is_vasp else None, "ourDoubleMinimization")
+    ts_calc = resolve_vasp_calc(config_dict, calc, i, 0 if is_vasp else None, "ourDoubleMinimization", atoms=atoms)
     active_vasp_calcs = [ts_calc] if is_vasp else []
     atoms.calc = ts_calc
 
@@ -179,7 +179,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                     return calc
                 if side not in side_calcs:
                     side_calcs[side] = resolve_vasp_calc(
-                        config_dict, calc, i, side, "ourDoubleMinimization")
+                        config_dict, calc, i, side, "ourDoubleMinimization", atoms=ts_atoms)
                     active_vasp_calcs.append(side_calcs[side])
                 return side_calcs[side]
 
@@ -360,11 +360,14 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
                 raise ValueError(
                     f"SinglePoint+VASP requires frames_per_job=1; got {len(frames)} frames.")
             a = frames[0]
-            vasp_calc = resolve_vasp_calc(config_dict, calc, i, None, "ourSinglePoint")
+            vasp_calc = resolve_vasp_calc(config_dict, calc, i, None, "ourSinglePoint", atoms=a)
             a.calc = vasp_calc
             energy_v = a.get_potential_energy()
             forces_v = a.get_forces()
             finalize_if_vasp_interactive(config_dict, vasp_calc)
+            # Stamp anything an [ourVasp] extra_outputs parser captured from the
+            # VASP dir (e.g. VTST dimer eigenmode/curvature) onto the output frame.
+            a.info.update(getattr(vasp_calc, "sm_extra_outputs", {}) or {})
             ef_pairs = [(energy_v, forces_v)]
         elif len(frames) > 1:
             # Single batched FAIRChem forward pass for all frames.
