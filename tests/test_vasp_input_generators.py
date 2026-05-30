@@ -16,6 +16,8 @@ from saddlemill.vasp_input_generators import (
 )
 from saddlemill.tools import (vasp_incar_kwargs, resolve_vasp_calc_class,
                               _with_extra_io)
+from ase.calculators.singlepoint import SinglePointCalculator
+from tests.conftest import make_config_dict
 
 
 # A tiny custom generator written to a temp file for the loader/precedence tests.
@@ -282,3 +284,76 @@ class TestExtraOutputsWiring:
         inst.read_results()
         assert inst.read_called is True                # super().read_results() ran
         assert "eigenmode" in inst.sm_extra_outputs    # parser ran after it
+
+
+class TestExtraOutputsReachSinglePointLMDB:
+    """End-to-end: a VASP `extra_outputs` parser's results must reach the
+    SinglePoint *lmdb* output, exactly as they do in traj output. Drives the real
+    ``geomopt.singlepoint()`` lmdb branch with a stand-in VASP calc (no DFT)."""
+
+    def _run_sp_lmdb(self, tmp_path, monkeypatch, sm_extra):
+        pytest.importorskip("fairchem.core.datasets")  # registers the aselmdb backend
+        from ase.db import connect
+        import saddlemill.geomopt as geomopt
+
+        monkeypatch.chdir(tmp_path)
+        os.mkdir("SinglePoint_lmdbs")
+        os.mkdir("SinglePoint_status_csvs")
+
+        energy = -42.0
+        forces = (np.arange(6, dtype=float).reshape(2, 3) + 1) * 0.1
+
+        # Stand in for resolve_vasp_calc: a calc that returns fixed E/F and carries
+        # whatever the extra_outputs parser would have stashed (no VASP needed).
+        def fake_resolve(config_dict, calc, i, subunit, section, atoms=None):
+            c = SinglePointCalculator(atoms, energy=energy, forces=forces)
+            c.sm_extra_outputs = sm_extra
+            return c
+
+        monkeypatch.setattr(geomopt, "resolve_vasp_calc", fake_resolve)
+        monkeypatch.setattr(geomopt, "finalize_if_vasp_interactive", lambda *a, **k: None)
+
+        a = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]], cell=[10, 10, 10], pbc=True)
+        # Source row carries a STALE eigenmode guess (zeros) + unrelated info.
+        source_info = {"orig_info": {"foo": 1},
+                       "eigenmode": [[0., 0., 0.], [0., 0., 0.]],
+                       "src_tag": "INPUT"}
+        extras = [{"kvp": {"sid": 5},
+                   "row_data": {"info": dict(source_info), "traj_path": "/in.traj"}}]
+
+        cfg = make_config_dict(method="SinglePoint", input_format="lmdb",
+                               Calculator="Vasp", vasp_command="x", frames_per_job=1)
+
+        geomopt.singlepoint(0, cfg, a, calc=None, consecutive_errors=[0],
+                            executorlib_worker_id=0, extras=extras)
+
+        with connect("SinglePoint_lmdbs/collected_sp_rank_0.aselmdb", type="aselmdb") as db:
+            row = db.get(1)
+        return row, energy, forces, source_info
+
+    def test_vasp_extras_merged_into_lmdb_info(self, tmp_path, monkeypatch):
+        sm_extra = {"eigenmode": np.array([[0., 0., 1.], [1., 0., 0.]]), "curvature": -0.77}
+        row, energy, forces, source_info = self._run_sp_lmdb(tmp_path, monkeypatch, sm_extra)
+
+        assert row.energy == energy                       # E/F populated via SPC
+        assert np.allclose(row.forces, forces)
+        info = row.data["info"]
+        # the dimer's fresh eigenmode overwrites the stale input guess
+        assert np.allclose(np.array(info["eigenmode"]), sm_extra["eigenmode"])
+        assert info["curvature"] == -0.77
+        # source info preserved verbatim alongside the new keys
+        assert info["src_tag"] == "INPUT"
+        assert info["orig_info"] == {"foo": 1}
+        assert row.data["traj_path"] == "/in.traj"
+
+    def test_no_extras_keeps_source_info_byte_equivalent(self, tmp_path, monkeypatch):
+        # FAIRChem-equivalent path: empty sm_extra -> source data passes through
+        # untouched (the build_lmdb_parallel byte-equivalence contract).
+        row, energy, forces, source_info = self._run_sp_lmdb(tmp_path, monkeypatch, {})
+
+        assert row.energy == energy
+        info = row.data["info"]
+        assert set(info.keys()) == set(source_info.keys())   # nothing added
+        assert "curvature" not in info
+        assert info["src_tag"] == "INPUT"
+        assert np.allclose(np.array(info["eigenmode"]), 0.0)  # stale guess untouched

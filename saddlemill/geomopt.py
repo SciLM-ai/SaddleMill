@@ -399,14 +399,23 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
             import fairchem.core.datasets  # noqa: F401  (register aselmdb backend)
             from ase.db import connect
             out_path = f"{method_name}_lmdbs/collected_sp_rank_{rank}.aselmdb"
+            # SinglePoint's contract: leave the source row's structure and info
+            # untouched, only add E/F. ase.db never serializes atoms.info — only
+            # the explicit data= blob — so we pass the source row_data through
+            # verbatim (no bookkeeping stamps; they'd be dropped anyway). The one
+            # exception is opted-in [ourVasp] extra_outputs (e.g. a VTST dimer's
+            # eigenmode/curvature): those are *new* results the user asked for, so
+            # merge them into the row's info so lmdb output carries the same extras
+            # as traj output. sm_extra is empty for FAIRChem (vasp_calc is None) ->
+            # byte-equivalent passthrough, preserving the build_lmdb_parallel parity.
+            sm_extra = getattr(vasp_calc, "sm_extra_outputs", {}) or {}
             with connect(out_path, type='aselmdb') as db:
                 for a, (e, f_arr), extra in zip(frames, ef_pairs, extras):
-                    a.info['src_index'] = i
-                    a.info['status'] = 'converged'
-                    a.info['task_name'] = task_name
                     a.calc = SinglePointCalculator(a, energy=e, forces=f_arr)
-                    db.write(a, **(extra.get('kvp') or {}),
-                             data=(extra.get('row_data') or {}))
+                    row_data = dict(extra.get('row_data') or {})
+                    if sm_extra:
+                        row_data['info'] = {**(row_data.get('info') or {}), **sm_extra}
+                    db.write(a, **(extra.get('kvp') or {}), data=row_data)
         else:
             out_path = f"{method_name}_trajes/collected_sp_rank_{rank}.traj"
             with Trajectory(out_path, 'a') as writer:
