@@ -341,6 +341,7 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
     input_format = config_dict["Main"]["input_format"]
     is_vasp = config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive")
     status_file = f"{method_name}_status_csvs/status_rank_{rank}.csv"
+    zip_name = f"{method_name}_debug_zips/structure_rank_{rank}_data.zip"
     task_name = get_task_name(config_dict)
 
     frames = atoms if isinstance(atoms, list) else [atoms]
@@ -426,10 +427,14 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
                     a.calc = SinglePointCalculator(a, energy=e, forces=f_arr)
                     writer.write(a)
 
-        if vasp_dir is not None and os.path.isdir(vasp_dir):
-            # SP has no _debug_zips/ — just drop the VASP scratch dir.
-            import shutil as _shutil
-            _shutil.rmtree(vasp_dir, ignore_errors=True)
+        if vasp_dir is not None:
+            # VASP SP leaves real artifacts (OUTCAR, plus DIMCAR/NEWMODECAR for a
+            # VTST dimer) worth keeping — archive them like every other VASP method
+            # (drop the heavy WAVECAR/CHG/CHGCAR first). zip=False just deletes the
+            # dir, preserving the old SP behavior. FAIRChem SP has no dir to handle.
+            remove_vasp_heavies(vasp_dir)
+            archive_and_clear_temp_files([vasp_dir], zip_name, prefix="",
+                                         enabled=config_dict['Main']['zip'])
 
         log_status("converged")
         if consecutive_errors is not None:
@@ -442,7 +447,9 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
             consecutive_errors[0] += 1
         if vasp_calc is not None:
             finalize_if_vasp_interactive(config_dict, vasp_calc)
-        if vasp_dir is not None and os.path.isdir(vasp_dir):
-            import shutil as _shutil
-            _shutil.rmtree(vasp_dir, ignore_errors=True)
+        if vasp_dir is not None:
+            # Keep the heavies on error — the WAVECAR/OUTCAR are the most useful
+            # thing for debugging a failed DFT/VTST run (matches other VASP methods).
+            archive_and_clear_temp_files([vasp_dir], zip_name, prefix="ERROR_",
+                                         enabled=config_dict['Main']['zip'])
         log_status(f"error: {str(e)}")

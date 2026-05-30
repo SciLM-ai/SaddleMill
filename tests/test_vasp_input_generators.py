@@ -357,3 +357,65 @@ class TestExtraOutputsReachSinglePointLMDB:
         assert "curvature" not in info
         assert info["src_tag"] == "INPUT"
         assert np.allclose(np.array(info["eigenmode"]), 0.0)  # stale guess untouched
+
+
+class TestSinglePointVaspDebugZip:
+    """SP+VASP must archive its scratch dir into SinglePoint_debug_zips/ (heavies
+    dropped on success), like the other VASP methods — not silently delete it.
+    Drives the real geomopt.singlepoint() VASP path with a stand-in calc (no DFT)."""
+
+    def _run(self, tmp_path, monkeypatch, zip_enabled):
+        import saddlemill.geomopt as geomopt
+
+        monkeypatch.chdir(tmp_path)
+        for d in ("SinglePoint_trajes", "SinglePoint_status_csvs", "SinglePoint_debug_zips"):
+            os.mkdir(d)
+
+        def fake_resolve(config_dict, calc, i, subunit, section, atoms=None):
+            d = f"VASP_{i}"
+            os.makedirs(d, exist_ok=True)
+            for name in ("OUTCAR", "DIMCAR"):                  # light artifacts to keep
+                with open(os.path.join(d, name), "w") as f:
+                    f.write(f"dummy {name}\n")
+            with open(os.path.join(d, "WAVECAR"), "wb") as f:  # heavy -> must be stripped
+                f.write(b"\x00" * 64)
+            return SinglePointCalculator(atoms, energy=-1.0, forces=np.zeros((2, 3)))
+
+        monkeypatch.setattr(geomopt, "resolve_vasp_calc", fake_resolve)
+        monkeypatch.setattr(geomopt, "finalize_if_vasp_interactive", lambda *a, **k: None)
+
+        a = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]], cell=[10, 10, 10], pbc=True)
+        cfg = make_config_dict(method="SinglePoint", input_format="traj",
+                               Calculator="Vasp", vasp_command="x", frames_per_job=1,
+                               zip=zip_enabled)
+        geomopt.singlepoint(0, cfg, a, calc=None, consecutive_errors=[0],
+                            executorlib_worker_id=0)
+
+    def test_create_results_dir_makes_debug_zips_only_for_vasp(self, tmp_path, monkeypatch):
+        from saddlemill.config import create_results_directories
+        v = tmp_path / "vasp"; v.mkdir(); monkeypatch.chdir(v)
+        create_results_directories(make_config_dict(method="SinglePoint",
+                                                    Calculator="Vasp", vasp_command="x"))
+        assert (v / "SinglePoint_debug_zips").is_dir()
+
+        f = tmp_path / "fc"; f.mkdir(); monkeypatch.chdir(f)
+        create_results_directories(make_config_dict(method="SinglePoint",
+                                                    Calculator="FAIRChemCalculator"))
+        assert not (f / "SinglePoint_debug_zips").exists()    # FAIRChem SP: none
+
+    def test_success_archives_dir_and_strips_heavies(self, tmp_path, monkeypatch):
+        import zipfile
+        self._run(tmp_path, monkeypatch, zip_enabled=True)
+        zpath = tmp_path / "SinglePoint_debug_zips" / "structure_rank_0_data.zip"
+        assert zpath.exists()
+        with zipfile.ZipFile(zpath) as zf:
+            names = zf.namelist()
+        assert any(n.endswith("VASP_0/OUTCAR") for n in names)
+        assert any(n.endswith("VASP_0/DIMCAR") for n in names)
+        assert not any("WAVECAR" in n for n in names)         # heavies dropped
+        assert not (tmp_path / "VASP_0").exists()             # scratch dir cleaned
+
+    def test_zip_false_just_deletes(self, tmp_path, monkeypatch):
+        self._run(tmp_path, monkeypatch, zip_enabled=False)
+        assert not (tmp_path / "VASP_0").exists()             # dir gone
+        assert not list((tmp_path / "SinglePoint_debug_zips").glob("*.zip"))  # no zip written

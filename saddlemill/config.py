@@ -433,10 +433,13 @@ def create_results_directories(config_dict):
     method_name = config_dict["Main"]["method"]
     dirs = [f"{method_name}_status_csvs"]
     if method_name == "SinglePoint":
-        # SP has no debug/log machinery; only the format-matching output dir.
+        # SP output dir matches input_format. Debug zips only for VASP — DFT leaves
+        # real artifacts worth keeping (FAIRChem SP produces none, so no zip dir).
         input_format = config_dict["Main"].get("input_format", "traj")
         out_subdir = "lmdbs" if input_format == "lmdb" else "trajes"
         dirs.append(f"{method_name}_{out_subdir}")
+        if config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"):
+            dirs.append(f"{method_name}_debug_zips")
     else:
         dirs.extend([f"{method_name}_trajes", f"{method_name}_debug_zips"])
     for d in dirs:
@@ -701,6 +704,11 @@ def _get_debug_filename_patterns(method_name):
             re.compile(r'^(?:ERROR_)?optimization_(\d+)'),
             re.compile(r'^(?:ERROR_)?VASP_(\d+)/'),
         ]
+    elif method_name == "SinglePoint":
+        # SP+VASP debug entries are only the per-job VASP dir (no log/traj temps).
+        # No subunit captured → the generic remove-whole-job branch in
+        # _should_remove_debug fires (SP's cleaned dict is {job_id: {None}}).
+        return [re.compile(r'^(?:ERROR_)?VASP_(\d+)/')]
     return []
 
 
