@@ -25,6 +25,7 @@ from saddlemill.tools import (
     extract_previous_results,
     _build_output_traj_index,
     _sanitize_with_continuation,
+    vasp_final_scf_converged,
 )
 
 
@@ -737,3 +738,36 @@ class TestSaveAndReadOrderedTrajNames:
         with open(tmp_path / "traj_files_ordered.json") as f:
             data = json.load(f)
         assert data == [["a.traj", 0, 1]]
+
+
+class TestVaspFinalScfConverged:
+    """vasp_final_scf_converged checks the LAST 'aborting loop' marker in OUTCAR,
+    so an intermediate NELM miss that later recovers does not fail the job."""
+
+    def _dir(self, tmp_path, body):
+        d = tmp_path / "VASP_x"
+        d.mkdir()
+        (d / "OUTCAR").write_text(body)
+        return str(d)
+
+    def test_final_scf_reached_true(self, tmp_path):
+        d = self._dir(tmp_path,
+            "------ aborting loop because EDIFF is reached ------\n"
+            "------ aborting loop because EDIFF is reached ------\n")
+        assert vasp_final_scf_converged(d) is True
+
+    def test_final_scf_not_reached_false(self, tmp_path):
+        d = self._dir(tmp_path,
+            "------ aborting loop because EDIFF is reached ------\n"
+            "------ aborting loop EDIFF was not reached (unconverged) ------\n")
+        assert vasp_final_scf_converged(d) is False
+
+    def test_intermediate_miss_then_recover_true(self, tmp_path):
+        # last marker is 'reached' -> converged, despite an earlier NELM miss
+        d = self._dir(tmp_path,
+            "------ aborting loop EDIFF was not reached (unconverged) ------\n"
+            "------ aborting loop because EDIFF is reached ------\n")
+        assert vasp_final_scf_converged(d) is True
+
+    def test_missing_outcar_returns_true(self, tmp_path):
+        assert vasp_final_scf_converged(str(tmp_path / "nope")) is True

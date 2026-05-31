@@ -1,4 +1,4 @@
-"""User-pluggable VASP input generation.
+"""User-pluggable VASP I/O: input generation, extra input-file writers, and output parsers.
 
 A *generator* maps an ASE ``Atoms`` object to a dict of ASE-``Vasp`` keyword
 arguments (lowercased INCAR tags plus ``kpts``/``gamma``/``setups``/``magmom``).
@@ -288,21 +288,27 @@ def read_vtst_dimer(calc, atoms, directory):
             pass
 
     # DIMCAR columns: Step Force Torque Energy Curvature Angle -> curvature is col 4.
+    # On convergence VTST's Dimer_Fin writes a final row with '---' in the
+    # Torque/Curvature/Angle columns (Step/Force/Energy stay numeric). Require BOTH
+    # Force AND Curvature to parse, so that terminator row -- and any Fortran '*****'
+    # overflow row -- is skipped and the curvature is taken from the last fully
+    # numeric row above it (the real near-saddle curvature). float(parts[4]) inside
+    # the guard means a non-numeric curvature can never reach the unguarded path.
     dimcar = os.path.join(directory, "DIMCAR")
     if os.path.isfile(dimcar):
-        last = None
+        last_curv = None
         try:
             with open(dimcar) as f:
                 for line in f:
                     parts = line.split()
                     if len(parts) >= 5:
                         try:
-                            float(parts[1])      # numeric row (skips the header)
-                            last = parts
+                            float(parts[1])              # Force (skips the header)
+                            last_curv = float(parts[4])  # Curvature; skips '---'/overflow
                         except ValueError:
                             continue
-            if last is not None:
-                info["curvature"] = float(last[4])
+            if last_curv is not None:
+                info["curvature"] = last_curv
         except OSError:
             pass
 

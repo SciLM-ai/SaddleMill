@@ -300,16 +300,16 @@ def load_method(config_dict):
         # (built-in name, 'module:func', or 'file.py:func'). Resolved, not called.
         gen_spec = config_dict.get("ourVasp", {}).get("input_generator")
         if gen_spec:
-            from saddlemill.vasp_input_generators import load_input_generator
+            from saddlemill.vasp_io import load_input_generator
             load_input_generator(gen_spec)
         extra_spec = config_dict.get("ourVasp", {}).get("extra_input_files")
         if extra_spec:
-            from saddlemill.vasp_input_generators import load_extra_input_writer
+            from saddlemill.vasp_io import load_extra_input_writer
             for s in ([extra_spec] if isinstance(extra_spec, str) else extra_spec):
                 load_extra_input_writer(s)
         out_spec = config_dict.get("ourVasp", {}).get("extra_outputs")
         if out_spec:
-            from saddlemill.vasp_input_generators import load_extra_output_parser
+            from saddlemill.vasp_io import load_extra_output_parser
             for s in ([out_spec] if isinstance(out_spec, str) else out_spec):
                 load_extra_output_parser(s)
     elif any(config_dict.get("ourVasp", {}).get(k) for k in
