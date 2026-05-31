@@ -20,7 +20,8 @@ ml unload xalt python3
 ml load impi cuda/12.8
 
 export VASP_PP_PATH=/home1/07700/sjung3/vasp
-export PATH=/home1/07700/sjung3/vasp/vasp.6.4.0.1/bin:$PATH
+export PATH=/home1/07700/sjung3/vasp/vasp.6.6.0_dposmax/bin:$PATH
+which vasp_std
 srun -N $SLURM_NNODES -n $SLURM_NNODES --mpi=pmi2 flux start python -u -m saddlemill
 
 date
