@@ -7,7 +7,8 @@ from ase.filters import FrechetCellFilter
 from ase.calculators.singlepoint import SinglePointCalculator
 from saddlemill.tools import (check_reaction, check_adsorbate_reaction, backup_flux_logs,
                               get_task_name, resolve_vasp_calc, remove_vasp_heavies,
-                              finalize_if_vasp_interactive, archive_and_clear_temp_files)
+                              finalize_if_vasp_interactive, archive_and_clear_temp_files,
+                              vasp_final_scf_converged)
 from saddlemill.dimeropt import _refine_eigenmode
 
 
@@ -353,6 +354,8 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
 
     vasp_calc = None
     vasp_dir = f"VASP_{i}" if is_vasp else None
+    sp_status = "converged"   # overwritten with the real verdict for VASP relaxations
+    record_converged = False  # True only when a real VASP convergence verdict applies
     try:
         if is_vasp:
             # Config-level guard enforces frames_per_job=1 for VASP; defensive
@@ -366,6 +369,35 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
             energy_v = a.get_potential_energy()
             forces_v = a.get_forces()
             finalize_if_vasp_interactive(config_dict, vasp_calc)
+            # Reject a run whose FINAL ionic step's SCF did not reach EDIFF -- its
+            # forces/energy are unreliable. (Intermediate NELM misses that later
+            # recover are fine; only the last electronic loop is checked.)
+            if not vasp_final_scf_converged(vasp_dir):
+                raise ValueError("scf_not_converged")
+            # Real convergence verdict for a VASP-driven relaxation (e.g. a VTST
+            # dimer, where VASP -- not an ASE optimizer -- owns the ionic loop).
+            # calc.converged is ASE's OUTCAR 'reached required accuracy' check
+            # (active for ibrion in [1,2,3], nsw!=0); corroborate it with the EDIFFG
+            # force criterion VTST itself uses: max per-atom |F| <= |EDIFFG| on the
+            # true force from a.get_forces() (NOT the DIMCAR total-norm 'Force').
+            # vasp_converged is None with no force criterion = a genuine single-point
+            # (nsw=0) with no convergence concept -> keep 'converged'.
+            vasp_converged = getattr(vasp_calc, "converged", None)
+            try:
+                ediffg = float(config_dict.get("Vasp", {}).get("ediffg"))
+            except (TypeError, ValueError):
+                ediffg = None
+            has_force_crit = ediffg is not None and ediffg < 0
+            if vasp_converged is None and not has_force_crit:
+                sp_status = "converged"   # genuine single-point: no convergence concept
+            else:
+                ok = bool(vasp_converged)
+                if has_force_crit:
+                    import numpy as _np
+                    fmax = float(_np.linalg.norm(forces_v, axis=1).max())
+                    ok = ok or (fmax <= abs(ediffg))
+                sp_status = "converged" if ok else "not_converged"
+                record_converged = True
             # Stamp anything an [ourVasp] extra_outputs parser captured from the
             # VASP dir (e.g. VTST dimer eigenmode/curvature) onto the output frame.
             a.info.update(getattr(vasp_calc, "sm_extra_outputs", {}) or {})
@@ -410,6 +442,12 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
             # as traj output. sm_extra is empty for FAIRChem (vasp_calc is None) ->
             # byte-equivalent passthrough, preserving the build_lmdb_parallel parity.
             sm_extra = getattr(vasp_calc, "sm_extra_outputs", {}) or {}
+            if record_converged:
+                # Record the real convergence verdict in lmdb data['info'] too
+                # (the CSV gets it via log_status regardless of output format). Only
+                # when a real verdict applies, so a pure single-point / FAIRChem row
+                # stays byte-equivalent to a build_lmdb_parallel run.
+                sm_extra = {**sm_extra, 'converged': int(sp_status == 'converged')}
             with connect(out_path, type='aselmdb') as db:
                 for a, (e, f_arr), extra in zip(frames, ef_pairs, extras):
                     a.calc = SinglePointCalculator(a, energy=e, forces=f_arr)
@@ -422,8 +460,10 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
             with Trajectory(out_path, 'a') as writer:
                 for a, (e, f_arr) in zip(frames, ef_pairs):
                     a.info['src_index'] = i
-                    a.info['status'] = 'converged'
+                    a.info['status'] = sp_status
                     a.info['task_name'] = task_name
+                    if record_converged:
+                        a.info['converged'] = int(sp_status == 'converged')
                     a.calc = SinglePointCalculator(a, energy=e, forces=f_arr)
                     writer.write(a)
 
@@ -436,7 +476,7 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
             archive_and_clear_temp_files([vasp_dir], zip_name, prefix="",
                                          enabled=config_dict['Main']['zip'])
 
-        log_status("converged")
+        log_status(sp_status)
         if consecutive_errors is not None:
             consecutive_errors[0] = 0
 

@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from ase import Atoms
 
-from saddlemill.vasp_input_generators import (
+from saddlemill.vasp_io import (
     load_input_generator, load_extra_input_writer, load_extra_output_parser,
     write_modecar, read_vtst_dimer, _pmg_set_to_ase_kwargs, _DRIVER_KEYS,
 )
@@ -47,8 +47,8 @@ class TestLoadInputGenerator:
 
     def test_module_func_path(self):
         # Resolve (not call) a real module:func without heavy imports.
-        gen = load_input_generator("saddlemill.vasp_input_generators:oc20")
-        from saddlemill.vasp_input_generators import oc20
+        gen = load_input_generator("saddlemill.vasp_io:oc20")
+        from saddlemill.vasp_io import oc20
         assert gen is oc20
 
     def test_file_path_func(self, custom_gen_file):
@@ -65,7 +65,7 @@ class TestLoadInputGenerator:
 
     def test_missing_func_in_module_raises(self):
         with pytest.raises(AttributeError):
-            load_input_generator("saddlemill.vasp_input_generators:does_not_exist")
+            load_input_generator("saddlemill.vasp_io:does_not_exist")
 
 
 class TestPrecedence:
@@ -296,6 +296,30 @@ class TestReadVtstDimer:
         mode_poscar = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], float)
         assert np.allclose(info["eigenmode"], mode_poscar[[2, 0, 1]])  # resorted
 
+    def test_converged_dimcar_dashes_reads_row_above(self, tmp_path):
+        # On convergence VTST's Dimer_Fin writes a final row with '---' in the
+        # Torque/Curvature/Angle columns (Step/Force/Energy stay numeric). The
+        # curvature must come from the last fully-numeric row above it, and the
+        # parse must NOT crash (the old code did float('---') -> ValueError).
+        (tmp_path / "DIMCAR").write_text(
+            "Step Force Torque Energy Curvature Angle\n"
+            "   12   0.11550   0.76786  -160.69013   -3.17780   2.88614\n"
+            "   13   0.07027   ---      -160.69053   ---        ---\n")
+        atoms = Atoms("H")
+        info = read_vtst_dimer(_FakeCalc(directory=str(tmp_path)), atoms, str(tmp_path))
+        assert info["curvature"] == -3.17780                    # row above the '---'
+
+    def test_overflow_curvature_row_skipped(self, tmp_path):
+        # A Fortran '*****' overflow in the Curvature column (numeric Force) must be
+        # skipped rather than crash, so the last clean curvature wins.
+        (tmp_path / "DIMCAR").write_text(
+            "Step Force Torque Energy Curvature Angle\n"
+            "    1   0.50   0.20   -10.0   -0.30      5.0\n"
+            "    2   106.0  61896  -9347   *********  60.6\n")
+        atoms = Atoms("H")
+        info = read_vtst_dimer(_FakeCalc(directory=str(tmp_path)), atoms, str(tmp_path))
+        assert info["curvature"] == -0.30
+
     def test_missing_files_returns_empty(self, tmp_path):
         atoms = Atoms("H")
         assert read_vtst_dimer(_FakeCalc(directory=str(tmp_path)), atoms, str(tmp_path)) == {}
@@ -454,3 +478,61 @@ class TestSinglePointVaspDebugZip:
         self._run(tmp_path, monkeypatch, zip_enabled=False)
         assert not (tmp_path / "VASP_0").exists()             # dir gone
         assert not list((tmp_path / "SinglePoint_debug_zips").glob("*.zip"))  # no zip written
+
+
+class TestSinglePointVaspConvergenceStatus:
+    """singlepoint() must report the REAL VASP convergence verdict, not always
+    'converged': calc.converged OR max per-atom |F| <= |EDIFFG|, with a final-step
+    SCF miss -> 'error: scf_not_converged'. Drives the real traj path (no DFT)."""
+
+    def _run(self, tmp_path, monkeypatch, *, converged, forces, ediffg=-0.05, scf_ok=True):
+        from ase.io import read as aseread
+        import saddlemill.geomopt as geomopt
+        monkeypatch.chdir(tmp_path)
+        os.mkdir("SinglePoint_trajes")
+        os.mkdir("SinglePoint_status_csvs")
+
+        def fake_resolve(config_dict, calc, i, subunit, section, atoms=None):
+            c = SinglePointCalculator(atoms, energy=-1.0, forces=np.asarray(forces))
+            c.converged = converged                 # what ASE read_convergence would set
+            c.sm_extra_outputs = {}
+            return c
+        monkeypatch.setattr(geomopt, "resolve_vasp_calc", fake_resolve)
+        monkeypatch.setattr(geomopt, "finalize_if_vasp_interactive", lambda *a, **k: None)
+        monkeypatch.setattr(geomopt, "vasp_final_scf_converged", lambda d: scf_ok)
+
+        a = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]], cell=[10, 10, 10], pbc=True)
+        cfg = make_config_dict(method="SinglePoint", Calculator="Vasp",
+                               vasp_command="x", frames_per_job=1, zip=False)
+        cfg["Vasp"] = {"ediffg": ediffg}
+        geomopt.singlepoint(0, cfg, a, calc=None, consecutive_errors=[0],
+                            executorlib_worker_id=0)
+
+        status = open("SinglePoint_status_csvs/status_rank_0.csv").read().strip()
+        traj = "SinglePoint_trajes/collected_sp_rank_0.traj"
+        frame = aseread(traj, index=-1) if (os.path.exists(traj) and os.path.getsize(traj)) else None
+        return status, frame
+
+    def test_calc_converged_true(self, tmp_path, monkeypatch):
+        big = [[0., 0., 0.2], [0., 0., 0.]]                 # > |EDIFFG|, but VASP says converged
+        status, frame = self._run(tmp_path, monkeypatch, converged=True, forces=big)
+        assert status.endswith('"converged"')
+        assert frame.info["status"] == "converged" and frame.info["converged"] == 1
+
+    def test_nsw_exhausted_not_converged(self, tmp_path, monkeypatch):
+        big = [[0., 0., 0.2], [0., 0., 0.]]                 # 0.2 > 0.05 and calc.converged False
+        status, frame = self._run(tmp_path, monkeypatch, converged=False, forces=big)
+        assert status.endswith('"not_converged"')
+        assert frame.info["status"] == "not_converged" and frame.info["converged"] == 0
+
+    def test_force_criterion_overrides_false(self, tmp_path, monkeypatch):
+        small = [[0., 0., 0.01], [0., 0., 0.]]              # <= 0.05 -> converged via |F|
+        status, frame = self._run(tmp_path, monkeypatch, converged=False, forces=small)
+        assert status.endswith('"converged"')
+        assert frame.info["converged"] == 1
+
+    def test_scf_gate_errors_and_writes_no_frame(self, tmp_path, monkeypatch):
+        small = [[0., 0., 0.01], [0., 0., 0.]]
+        status, frame = self._run(tmp_path, monkeypatch, converged=True, forces=small, scf_ok=False)
+        assert "error: scf_not_converged" in status
+        assert frame is None                                # bad SCF -> nothing written

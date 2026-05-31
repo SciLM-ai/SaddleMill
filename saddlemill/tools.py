@@ -84,7 +84,7 @@ def vasp_incar_kwargs(config_dict, atoms=None):
     vasp_section = dict(config_dict.get("Vasp", {}))
     gen_spec = config_dict.get("ourVasp", {}).get("input_generator")
     if gen_spec and atoms is not None:
-        from saddlemill.vasp_input_generators import load_input_generator
+        from saddlemill.vasp_io import load_input_generator
         gen_kwargs = load_input_generator(gen_spec)(atoms)
         return {**gen_kwargs, **vasp_section}  # [Vasp] keys override generator
     return vasp_section
@@ -134,7 +134,7 @@ def resolve_vasp_calc_class(config_dict, calc):
     out_spec = our_vasp.get("extra_outputs")
     if not in_spec and not out_spec:
         return calc
-    from saddlemill.vasp_input_generators import (load_extra_input_writer,
+    from saddlemill.vasp_io import (load_extra_input_writer,
                                                   load_extra_output_parser)
     _aslist = lambda s: [s] if isinstance(s, str) else list(s)
     writers = [load_extra_input_writer(s) for s in _aslist(in_spec)] if in_spec else []
@@ -214,6 +214,31 @@ def finalize_if_vasp_interactive(config_dict, calc_instance):
             calc_instance.finalize()
         except Exception:
             pass
+
+
+def vasp_final_scf_converged(directory):
+    """Return True iff the LAST electronic (SCF) loop in OUTCAR reached EDIFF.
+
+    VASP 6 labels each SCF exit: ``aborting loop because EDIFF is reached`` when an
+    ionic step's electronic loop converges, and ``aborting loop because EDIFF was
+    not reached (unconverged)`` (a NELM miss) when it does not. We keep the verdict
+    of the LAST such marker, so an intermediate step that blew NELM but later
+    recovered does not fail the job — only the final structure's SCF must be sound.
+    Returns True when OUTCAR is missing/unreadable or has no marker (can't tell ->
+    don't block; a genuinely broken run errors out elsewhere on parsing).
+    """
+    outcar = os.path.join(directory, "OUTCAR")
+    if not os.path.isfile(outcar):
+        return True
+    result = True
+    try:
+        with open(outcar) as f:
+            for line in f:
+                if "aborting loop" in line:
+                    result = "because EDIFF is reached" in line
+    except OSError:
+        return True
+    return result
 
 
 #==============================================================================
