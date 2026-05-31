@@ -37,7 +37,7 @@ def custom_gen_file(tmp_path):
 
 class TestLoadInputGenerator:
     def test_builtin_names_resolve_to_callables(self):
-        for name in ("omat24_static", "omat24_relax", "oc20"):
+        for name in ("omat24_static", "omat24_relax", "cheap_omat", "oc20"):
             gen = load_input_generator(name)
             assert callable(gen)
 
@@ -117,6 +117,41 @@ def test_omat24_translation(set_name):
     assert "kpts" in kw and len(kw["kpts"]) == 3
     assert kw.get("setups") == {"Fe": "_pv"}
     assert kw["ispin"] == 2
+    # Pure-metal Fe (no O/F) -> no DFT+U emitted at all.
+    assert "ldau_luj" not in kw and "ldauu" not in kw
+
+
+def test_omat24_ldau_element_keyed():
+    """DFT+U must be emitted as element-keyed ``ldau_luj`` (not the positional
+    ldauu/ldaul/ldauj lists), so ASE's alphabetical atom re-sort cannot land U
+    on the wrong element."""
+    pytest.importorskip("pymatgen")
+    pytest.importorskip("fairchem.data.omat")
+    from ase.build import bulk
+    atoms = bulk("FeO", "rocksalt", a=4.3)                # Fe + O -> Hubbard U on Fe
+    kw = load_input_generator("omat24_static")(atoms)
+
+    assert "ldau_luj" in kw                               # element-keyed dict
+    assert not any(k in kw for k in ("ldauu", "ldaul", "ldauj"))  # raw lists dropped
+    assert kw["ldau_luj"]["Fe"] == {"L": 2, "U": 5.3, "J": 0.0}   # U on Fe, d-shell
+    assert kw["ldau_luj"]["O"]["U"] == 0.0               # not on O
+    assert len(kw["magmom"]) == len(atoms)               # magmom stays per-atom
+
+
+def test_cheap_omat():
+    """cheap_omat = OMat24 static with reciprocal_density 16 + minimal-base light
+    POTCARs (plain metals, soft O/C/N) for a cheap first-pass saddle search."""
+    pytest.importorskip("pymatgen")
+    pytest.importorskip("fairchem.data.omat")
+    import numpy as np
+    from ase.build import bulk
+    atoms = bulk("Fe", "bcc", a=2.87, cubic=True)
+    cheap = load_input_generator("cheap_omat")(atoms)
+    full = load_input_generator("omat24_static")(atoms)
+
+    assert np.prod(cheap["kpts"]) < np.prod(full["kpts"])          # lighter mesh (rd 16 < 64)
+    assert cheap["setups"] == {"base": "minimal", "O": "_s", "C": "_s", "N": "_s"}
+    assert cheap["encut"] == full["encut"] and cheap["ismear"] == -5  # electronics left to [Vasp]
 
 
 def test_oc20_translation():

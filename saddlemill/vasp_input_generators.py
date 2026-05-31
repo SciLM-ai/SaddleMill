@@ -8,8 +8,8 @@ writes every input file itself, atom sorting, the resort that maps forces back,
 POTCAR selection, and the ``VaspInteractive`` interactive flags are all handled
 correctly. The generator only decides *what settings to use*, never writes files.
 
-Selection lives in ``[Vasp] input_generator`` and may be:
-  - a built-in name: ``omat24_static``, ``omat24_relax``, ``oc20``
+Selection lives in ``[ourVasp] input_generator`` and may be:
+  - a built-in name: ``omat24_static``, ``omat24_relax``, ``cheap_omat``, ``oc20``
   - ``package.module:func`` — import an installed module and use ``func``
   - ``/abs/or/rel/file.py:func`` — load a local ``.py`` file and use ``func``
 
@@ -26,7 +26,7 @@ tags are intentionally dropped here.
 
 ----
 
-This module also provides **extra-input-file writers** (``[Vasp]
+This module also provides **extra-input-file writers** (``[ourVasp]
 extra_input_files``): callables ``writer(calc, atoms, directory) -> None`` that
 drop additional files into the VASP working directory *after* ASE has written
 INCAR/POSCAR/etc. (so ``calc.sort`` and the directory exist) and *before* VASP
@@ -65,13 +65,33 @@ def _pmg_set_to_ase_kwargs(input_set):
     The input set must be built with ``sort_structure=False`` so that any
     per-site ``MAGMOM`` stays aligned to the ASE atom order — ASE's
     ``set_magmom`` then re-sorts it into POSCAR (symbol) order itself.
+
+    DFT+U is special-cased. pymatgen emits ``LDAUU``/``LDAUL``/``LDAUJ`` as
+    *positional* lists aligned to its own POSCAR species order
+    (``poscar.site_symbols``). ASE re-sorts the atoms and would write those
+    lists verbatim, landing U on the wrong element. We instead emit ASE's
+    element-keyed ``ldau_luj`` dict, which ASE re-orders to its own POSCAR — so
+    U follows the species. (ASE rejects ``ldau_luj`` alongside the raw lists,
+    so they are dropped.) ``MAGMOM`` needs no such treatment: it is per-atom and
+    ASE's ``set_magmom`` already re-sorts it.
     """
     kwargs = {}
-    for k, v in input_set.incar.items():
+    incar = input_set.incar
+    for k, v in incar.items():
         key = k.lower()
         if key in _DRIVER_KEYS:
             continue
         kwargs[key] = _to_native(v)
+
+    # DFT+U: positional lists -> element-keyed ldau_luj (see docstring).
+    if "LDAUU" in incar:
+        luj = {}
+        for sym, ll, uu, jj in zip(input_set.poscar.site_symbols,
+                                   incar["LDAUL"], incar["LDAUU"], incar["LDAUJ"]):
+            luj.setdefault(sym, {"L": int(ll), "U": float(uu), "J": float(jj)})
+        for raw in ("ldauu", "ldaul", "ldauj"):
+            kwargs.pop(raw, None)
+        kwargs["ldau_luj"] = luj
 
     # KPOINTS -> explicit k-mesh + gamma flag.
     kp = getattr(input_set, "kpoints", None)
@@ -90,12 +110,12 @@ def _pmg_set_to_ase_kwargs(input_set):
     return kwargs
 
 
-def _omat24(atoms, set_cls_name):
+def _omat24(atoms, set_cls_name, **set_kwargs):
     from pymatgen.io.ase import AseAtomsAdaptor
     from fairchem.data.omat.vasp import sets as omat_sets
     set_cls = getattr(omat_sets, set_cls_name)
     struct = AseAtomsAdaptor.get_structure(atoms)
-    iset = set_cls(struct, sort_structure=False)
+    iset = set_cls(struct, sort_structure=False, **set_kwargs)
     return _pmg_set_to_ase_kwargs(iset)
 
 
@@ -107,6 +127,26 @@ def omat24_static(atoms):
 def omat24_relax(atoms):
     """OMat24 relaxation accuracy settings (ionic-driver tags stripped)."""
     return _omat24(atoms, "OMat24RelaxSet")
+
+
+def cheap_omat(atoms):
+    """OMat24 recipe tuned DOWN for a cheap first-pass saddle search.
+
+    Two changes vs :func:`omat24_static`: the k-point reciprocal density drops
+    from 64 to 16, and the POTCARs are lightened to ASE's ``minimal`` base
+    (plain potentials for transition metals, mandatory semicore only for
+    alkali/alkaline-earth) with soft ``_s`` O/C/N — so ENCUT can fall to ~300.
+    Reconverge the resulting saddle with :func:`omat24_static`. Electronic and
+    accuracy knobs (ENCUT, EDIFF, PREC, ISMEAR, SIGMA, ALGO) are intentionally
+    left to the ``[Vasp]`` section.
+
+    Note: there is no soft ``_s`` POTCAR for F (and a few other hard anions),
+    so fluorine-bearing systems still need a higher ENCUT than 300.
+    """
+    kwargs = _omat24(atoms, "OMat24StaticSet",
+                     user_kpoints_settings={"reciprocal_density": 16})
+    kwargs["setups"] = {"base": "minimal", "O": "_s", "C": "_s", "N": "_s"}
+    return kwargs
 
 
 def oc20(atoms):
@@ -123,6 +163,7 @@ def oc20(atoms):
 _BUILTINS = {
     "omat24_static": omat24_static,
     "omat24_relax": omat24_relax,
+    "cheap_omat": cheap_omat,
     "oc20": oc20,
 }
 
