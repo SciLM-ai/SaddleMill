@@ -16,6 +16,8 @@ conda activate saddlemill
 
 export VASP_PP_PATH=/home/graeme/vasp
 #export PATH=/opt/ohpc/pub/libs/intel/openmpi5/vasp/6.6.0/bin:$PATH  # should already be loaded as module
-srun -N $SLURM_NNODES -n $SLURM_NNODES flux start python -u -m saddlemill
+srun -N $SLURM_NNODES -n $SLURM_NNODES --mpi=pmi2 flux start \
+    env -u PMI2_FD -u PMI_FD -u PMI2_RANK -u PMI_RANK -u PMI2_SIZE -u PMI_SIZE -u PMI2_SPROUTE \
+    python -u -m saddlemill
 
 date

@@ -96,6 +96,18 @@ MPICC="cc -shared" pip install --force-reinstall --no-cache-dir --no-binary=mpi4
 
 ```
 
+#### *In-house CPU cluster*
+
+CPU-only (no GPU/CUDA), for VASP runs — no `torch`/`fairchem-core`. Create the env as `saddlemill` directly (no later clone):
+
+```bash
+conda create -n saddlemill -c conda-forge python=3.12 flux-core flux-sched "openmpi=5.0.5" executorlib
+conda activate saddlemill
+
+find $CONDA_PREFIX -name "sched-fluxion-*.so" -path "*feedstock_root*" -exec cp {} $CONDA_PREFIX/lib/flux/modules/ \;
+
+```
+
 ### 2. Verify Flux Resources
 
 Check if flux detects all resources correctly:
@@ -104,6 +116,8 @@ Check if flux detects all resources correctly:
 # For the GH200 HPC and the 4 A100 per node HPC
 srun -n 2 flux start flux resource list
 # For the 3 A100 per node HPC
+srun -n 2 --mpi=pmi2 flux start flux resource list
+# For the in-house CPU cluster (grab nodes first, e.g. salloc --nodes 2 --qos debug)
 srun -n 2 --mpi=pmi2 flux start flux resource list
 
 ```
@@ -129,6 +143,14 @@ pip install git+https://github.com/ulissigroup/vasp-interactive.git
 pip install "torch==2.9.0+cu128" --index-url https://download.pytorch.org/whl/cu128
 
 ```
+
+**In-house CPU cluster (VASP-only):** the `saddlemill` env is already the app env (no `--clone`); VASP needs no `fairchem-core`/`torch`. Install only:
+
+```bash
+pip install "ase>=3.26.0" scipy==1.16 fairchem-data-omat fairchem-data-oc
+```
+
+Add `fairchem-core>=2.19.0` only for the FAIRChem calculator or `.aselmdb` I/O.
 
 ## Configuration
 
@@ -169,6 +191,8 @@ Request an interactive node:
 idev -p gh-dev -N 1 -m 120 -A YOUR_ALLOCATION
 # or for the 3 A100 per node HPC:
 idev -p gpu-a100-dev -N 1 -m 120 -A YOUR_ALLOCATION
+# or for the in-house CPU cluster:
+salloc --nodes 2 --qos debug
 
 ```
 
@@ -202,6 +226,11 @@ for lib in cuda_runtime nvjitlink cusparse cublas cufft cudnn curand cusolver nc
 done
 # --- END: FIX LIBRARY PATHS ---
 
+
+# On the in-house CPU cluster (VASP-only; no CUDA/FAIRChem):
+export PYTHONPATH=<saddlemill_path>:$PYTHONPATH
+export VASP_PP_PATH=/path/to/vasp/potcars    # directory holding potpaw_PBE.<version>/
+
 ```
 
 ### Running SaddleMill
@@ -211,6 +240,12 @@ Create a `config.ini` in your working directory (see `CLAUDE.md` for full refere
 ```bash
 # Distributed (multi-node, multi-GPU)
 srun -N $SLURM_NNODES -n $SLURM_NNODES --gpus-per-node=4 flux start python -u -m saddlemill
+
+# Distributed on the in-house CPU cluster (no --gpus-per-node; --mpi=pmi2 + clear inherited
+# PMI vars so the inner Flux/MPI doesn't clash with the outer srun):
+srun -N $SLURM_NNODES -n $SLURM_NNODES --mpi=pmi2 flux start \
+    env -u PMI2_FD -u PMI_FD -u PMI2_RANK -u PMI_RANK -u PMI2_SIZE -u PMI_SIZE -u PMI2_SPROUTE \
+    python -u -m saddlemill
 
 # Serial (single GPU, useful for debugging)
 # Set executorlib = False in config.ini, then:
