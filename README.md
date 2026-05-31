@@ -144,6 +144,8 @@ pip install "torch==2.9.0+cu128" --index-url https://download.pytorch.org/whl/cu
 
 ```
 
+**VTST + VASP (manual ASE patch required for now):** ASE ≤ 3.28 writes the integer INCAR tag `DROTMAX` as a float (`10.000000`), which VASP's VTST dimer silently ignores (falls back to `RotMax 4`). Until fixed upstream, patch the installed ASE — in `ase/calculators/vasp/create_input.py`, move `'drotmax'` from `float_keys` to `int_keys`. The `ase` version pin will be bumped to the fixed release once available. (Guarded by `tests/test_ase_vasp_incar.py`.)
+
 **In-house CPU cluster (VASP-only):** the `saddlemill` env is already the app env (no `--clone`); VASP needs no `fairchem-core`/`torch`. Install only:
 
 ```bash
