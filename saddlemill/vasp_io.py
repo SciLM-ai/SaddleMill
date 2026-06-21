@@ -142,10 +142,21 @@ def cheap_omat(atoms):
 
     Note: there is no soft ``_s`` POTCAR for F (and a few other hard anions),
     so fluorine-bearing systems still need a higher ENCUT than 300.
+
+    Lanthanides keep the f-in-core ``_3`` POTCARs (as OMat24StaticSet picks); the
+    f-in-valence ones make the SCF non-convergent on partially-filled-4f systems.
     """
     kwargs = _omat24(atoms, "OMat24StaticSet",
                      user_kpoints_settings={"reciprocal_density": 16})
-    kwargs["setups"] = {"base": "minimal", "O": "_s", "C": "_s", "N": "_s"}
+    setups = {"base": "minimal", "O": "_s", "C": "_s", "N": "_s"}
+    # Preserve the f-in-core ``_3`` lanthanide POTCARs that OMat24StaticSet selects (only
+    # for lanthanides actually present). The ``minimal`` base would otherwise revert them to
+    # f-in-valence potentials, whose partially-filled 4f shell makes the SCF non-convergent
+    # on these systems. (La/Ce/Eu/Gd stay standard, matching OMat24StaticSet.)
+    _LANTH_FCORE = {"Pr", "Nd", "Pm", "Sm", "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu"}
+    for _el in _LANTH_FCORE.intersection(atoms.get_chemical_symbols()):
+        setups[_el] = "_3"
+    kwargs["setups"] = setups
     return kwargs
 
 

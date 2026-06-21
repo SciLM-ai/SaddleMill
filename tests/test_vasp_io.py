@@ -154,6 +154,24 @@ def test_cheap_omat():
     assert cheap["encut"] == full["encut"] and cheap["ismear"] == -5  # electronics left to [Vasp]
 
 
+def test_cheap_omat_lanthanide_fcore():
+    """cheap_omat must keep the f-in-core ``_3`` lanthanide POTCARs (same as omat24_static);
+    the minimal base would otherwise pick f-in-valence potentials that don't converge."""
+    pytest.importorskip("pymatgen")
+    pytest.importorskip("fairchem.data.omat")
+    from ase import Atoms
+    # Nd (uses _3) + Gd (stays standard) + Fe (lightened to minimal)
+    atoms = Atoms("NdGdFe", positions=[(0, 0, 0), (3, 0, 0), (6, 0, 0)], cell=[12, 8, 8], pbc=True)
+    cheap = load_input_generator("cheap_omat")(atoms)
+    full = load_input_generator("omat24_static")(atoms)
+
+    assert cheap["setups"]["Nd"] == "_3"          # f-in-core kept, not reverted to valence
+    assert "Gd" not in cheap["setups"]            # Gd stays standard (matches OMat24StaticSet)
+    assert cheap["setups"]["base"] == "minimal"   # non-f elements still lightened
+    # lanthanide choice agrees with omat24_static
+    assert cheap["setups"].get("Nd") == full.get("setups", {}).get("Nd")
+
+
 def test_oc20_translation():
     pytest.importorskip("fairchem.data.oc")
     from ase.build import fcc111, add_adsorbate
