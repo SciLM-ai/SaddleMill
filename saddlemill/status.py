@@ -70,8 +70,21 @@ def _compute_expected_entries_per_job(method_name, config):
                 num_types = len(reaction_types.split())
         else:
             return None
-        num_per_type = config.get_value("ourDimer", "num_attempts_per_type", 1)
-        return num_types * num_per_type
+        
+        raw_num = config.get_value("ourDimer", "num_attempts_per_type", 1)
+
+        if isinstance(raw_num, list):
+            counts = [int(x) for x in raw_num]
+        elif isinstance(raw_num, str):
+            counts = [int(x) for x in raw_num.split()]
+        else:
+            counts = [int(raw_num)]
+            
+        if len(counts) == 1:
+            return num_types * counts[0]
+        else:
+            return sum(counts)
+
     elif method_name == "DoubleMinimization":
         return 2
     elif method_name == "Minimization":
@@ -81,13 +94,23 @@ def _compute_expected_entries_per_job(method_name, config):
     return None
 
 
-def _get_dimer_reaction_type(attempt_id, reaction_types_list, num_per_type):
+def _get_dimer_reaction_type(attempt_id, reaction_types_list, counts):
     """Map attempt_id to reaction type using config ordering."""
-    type_idx = attempt_id // num_per_type
+    if len(counts) == 1:
+        type_idx = attempt_id // counts[0]
+    else:
+        # Find which bucket the attempt_id falls into
+        current_sum = 0
+        type_idx = 0
+        for count in counts:
+            current_sum += count
+            if attempt_id < current_sum:
+                break
+            type_idx += 1
+
     if type_idx < len(reaction_types_list):
         return reaction_types_list[type_idx]
     return "unknown"
-
 
 def _print_dimer_reaction_type_table(rows, config):
     """Print per-reaction-type breakdown table for Dimer jobs."""
@@ -98,7 +121,14 @@ def _print_dimer_reaction_type_table(rows, config):
         reaction_types_list = reaction_types
     else:
         reaction_types_list = reaction_types.split()
-    num_per_type = config.get_value("ourDimer", "num_attempts_per_type", 1)
+
+    raw_num = config.get_value("ourDimer", "num_attempts_per_type", 1)
+    if isinstance(raw_num, list):
+        counts = [int(x) for x in raw_num]
+    elif isinstance(raw_num, str):
+        counts = [int(x) for x in raw_num.split()]
+    else:
+        counts = [int(raw_num)]
 
     # Accumulate counts per reaction type
     type_stats = {}  # {rtype: {converged, not_converged, errored, total}}
@@ -106,7 +136,7 @@ def _print_dimer_reaction_type_table(rows, config):
         attempt_id = int(row[2])
         status = row[-1].strip()
         category = _categorize_status(status)
-        rtype = _get_dimer_reaction_type(attempt_id, reaction_types_list, num_per_type)
+        rtype = _get_dimer_reaction_type(attempt_id, reaction_types_list, counts)
         if rtype not in type_stats:
             type_stats[rtype] = {"converged": 0, "not_converged": 0, "errored": 0, "total": 0}
         type_stats[rtype][category] += 1
