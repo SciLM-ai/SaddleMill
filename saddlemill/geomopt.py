@@ -16,7 +16,7 @@ def relax_structure(config_dict, optimizable, logfile, trajfile, Optimizer):
     opt = Optimizer(optimizable, logfile=logfile, trajectory=trajfile,
                     **config_dict[config_dict["Main"]["Optimizer"]])
     converged = opt.run(fmax=config_dict["Main"]["fmax"], steps=config_dict["Main"]["steps"])
-    return converged
+    return converged, opt.get_number_of_steps()
 
 
 def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, executorlib_worker_id=None, **kwargs):
@@ -60,7 +60,7 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
 
         try:
             optimizable = FrechetCellFilter(atoms) if config_dict['our'+method_name]['relax_cell'] else atoms
-            converged = relax_structure(config_dict, optimizable, temp_opt_log, temp_traj, Optimizer)
+            converged, n_force_calls = relax_structure(config_dict, optimizable, temp_opt_log, temp_traj, Optimizer)
             energy = atoms.get_potential_energy()
             forces = atoms.get_forces()
             finalize_if_vasp_interactive(config_dict, vasp_calc)
@@ -77,6 +77,7 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
             atoms.info['task_name'] = task_name
             atoms.info['parent_ts_index'] = parent_source_idx
             atoms.info['src_index'] = i
+            atoms.info['n_force_calls'] = int(n_force_calls)
             atoms.wrap()
             atoms.calc = SinglePointCalculator(atoms, energy=energy, forces=forces)
 
@@ -122,9 +123,9 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
     zip_name = f"{method_name}_debug_zips/structure_rank_{rank}_data.zip"
     task_name = get_task_name(config_dict)
 
-    def log_status(side_id, parent_source_idx, status_msg):
+    def log_status(side_id, parent_source_idx, status_msg, n_force_calls=0):
         with open(status_file, 'a') as f:
-            f.write(f'{i},{rank},{side_id},{parent_source_idx},"{status_msg}"\n')
+            f.write(f'{i},{rank},{side_id},{parent_source_idx},{n_force_calls},"{status_msg}"\n')
 
     # 3. Initialize list to track temp files from BOTH optimizations
     temp_files = []
@@ -204,6 +205,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                     energy = ts_energy
                     forces = ts_forces
                     conv = True
+                    side_nfc = 0
                     # The skip-side dir got one single-point during the desorption
                     # check above; finalize + clean WAVECAR so nothing leaks.
                     if is_vasp and side in side_calcs:
@@ -223,7 +225,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                     temp_files.extend([log_f, traj_f])
 
                     optimizable = FrechetCellFilter(min_atoms) if config_dict['our'+method_name]['relax_cell'] else min_atoms
-                    conv = relax_structure(config_dict, optimizable, log_f, traj_f, Optimizer)
+                    conv, side_nfc = relax_structure(config_dict, optimizable, log_f, traj_f, Optimizer)
                     energy = min_atoms.get_potential_energy()
                     forces = min_atoms.get_forces()
                     if is_vasp:
@@ -234,6 +236,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                         raise ValueError(f"Missing continuation data for kept side={side}")
                     min_atoms = continuation_data[side].copy()
                     conv = bool(min_atoms.info.get('orig_info', {}).get('converged'))
+                    side_nfc = 0
                     energy = min_atoms.get_potential_energy()
                     forces = min_atoms.get_forces()
 
@@ -241,10 +244,11 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                 min_atoms.info['parent_ts_index'] = parent_source_idx
                 min_atoms.info['converged'] = conv
                 min_atoms.info['src_index'] = i
-                mins[side] = (min_atoms, conv, energy, forces)
+                min_atoms.info['n_force_calls'] = int(side_nfc)
+                mins[side] = (min_atoms, conv, energy, forces, side_nfc)
 
-            min1, conv1, min1_energy, min1_forces = mins[-1]
-            min2, conv2, min2_energy, min2_forces = mins[1]
+            min1, conv1, min1_energy, min1_forces, min1_nfc = mins[-1]
+            min2, conv2, min2_energy, min2_forces, min2_nfc = mins[1]
 
             # --- CHECK REACTION ---
             neighbor_fudge = 1.25
@@ -300,7 +304,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
 
             for side in mins:
                 if entries_to_run is None or side in entries_to_run:
-                    log_status(side, parent_source_idx, side_statuses[side])
+                    log_status(side, parent_source_idx, side_statuses[side], mins[side][4])
 
             if consecutive_errors is not None:
                 consecutive_errors[0] = 0

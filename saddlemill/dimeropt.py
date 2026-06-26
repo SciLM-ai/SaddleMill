@@ -22,18 +22,38 @@ class StopRun(Exception):
 
 def _setup_dimer(atoms, calc, eigenmode=None, displacement_dict=None,
                  dimer_control_kwargs=None, control_logfile=None,
-                 logfile=None, trajectory=None):
+                 logfile=None, trajectory=None,
+                 engine="ase", kappa_kwargs=None, kappa_control_kwargs=None):
     """Create MinModeAtoms and MinModeTranslate optimizer for dimer method.
 
     Does not run the optimization. Caller attaches callbacks and calls
     dim_rlx.run().
 
     Returns (d_atoms, dim_rlx).
+
+    kappa_kwargs: KappaMinModeAtoms knobs (beta, recover_fmax).
+    kappa_control_kwargs: DimerControl kwargs for the Phase-B (kappa) rotation;
+        None -> KappaMinModeAtoms builds its own tuned default.    
+    beta - how abrupt changes in kappa change the force.
+    recover_fmax - what fmax to switch back to normal dimer. 
     """
+
     atoms.calc = calc
     d_control = DimerControl(logfile=control_logfile, **(dimer_control_kwargs or {}))
     eig_kw = {'eigenmodes': [np.array(eigenmode)]} if eigenmode is not None else {}
-    d_atoms = MinModeAtoms(atoms, d_control, **eig_kw)
+
+    if engine == "kappa":
+        from saddlemill.dimertools.kappa_dimer import KappaMinModeAtoms
+        kw = dict(kappa_kwargs or {})
+        if kappa_control_kwargs:
+            kw["kappa_control"] = DimerControl(logfile=control_logfile,
+                                               **kappa_control_kwargs)
+        d_atoms = KappaMinModeAtoms(atoms, control=d_control, **eig_kw, **kw)
+    elif engine == "ase":
+        d_atoms = MinModeAtoms(atoms, d_control, **eig_kw)
+    else:
+        raise ValueError(f"Unknown [ourDimer] engine={engine!r}; expected 'ase' or 'kappa'.")
+
     if displacement_dict:
         d_atoms.displace(**displacement_dict)
     else:
@@ -41,7 +61,6 @@ def _setup_dimer(atoms, calc, eigenmode=None, displacement_dict=None,
                          method='vector')
     dim_rlx = MinModeTranslate(d_atoms, trajectory=trajectory, logfile=logfile)
     return d_atoms, dim_rlx
-
 
 def _refine_eigenmode(atoms, calc, eigenmode, dimer_control_kwargs=None,
                       control_logfile=None):
@@ -67,8 +86,12 @@ def _refine_eigenmode(atoms, calc, eigenmode, dimer_control_kwargs=None,
 def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executorlib_worker_id=None, **kwargs):
 
     rank = executorlib_worker_id
-    random.seed(i)
-    np.random.seed(i)
+
+    run_offset = int(os.environ.get("SM_RUN_OFFSET", "0"))
+    seed = i + run_offset * 1000
+
+    random.seed(seed)
+    np.random.seed(seed)
 
     method_name = config_dict["Main"]["method"]
     status_file = f"{method_name}_status_csvs/status_rank_{rank}.csv"
@@ -85,7 +108,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
 
     def log_status(attempt, slctd_indx, status_msg):
         with open(status_file, 'a') as f:
-            f.write(f'{i},{rank},{attempt},{slctd_indx},"{status_msg}"\n')
+            f.write(f'{i},{rank},{attempt},{slctd_indx},{n_force_calls},"{status_msg}"\n')
 
     # --- MAIN LOOP ---
     any_attempt_succeeded = False
@@ -154,6 +177,12 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                     dimer_control_kwargs=config_dict["DimerControl"],
                     control_logfile=temp_log,
                     logfile=temp_opt_log, trajectory=temp_traj,
+                    engine=config_dict["ourDimer"]["engine"],
+                    kappa_kwargs={
+                        "beta": config_dict["ourDimer"]["kappa_beta"],
+                        "recover_fmax": config_dict["ourDimer"]["kappa_recover_fmax"],
+                    },
+                    kappa_control_kwargs=(config_dict.get("Kappa") or None),
                 )
 
                 # PR Check — skip early steps to let the dimer rotate
@@ -221,6 +250,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                 # Metadata
                 eigenmode = d_atoms.get_eigenmode()
                 curvature = d_atoms.get_curvature()
+                n_force_calls = d_atoms.control.get_counter('forcecalls')
                 energy = atoms.get_potential_energy()
                 forces = atoms.get_forces()
                 finalize_if_vasp_interactive(config_dict, attempt_calc)
@@ -229,6 +259,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
 
                 atoms.info['eigenmode'] = eigenmode
                 atoms.info['curvature'] = float(curvature)
+                atoms.info['n_force_calls'] = int(n_force_calls)
                 # atoms.info['converged'] = 1 if converged else 0
                 atoms.info['src_index'] = i
                 atoms.info['attempt_id'] = attempt
@@ -252,7 +283,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                 archive_and_clear_temp_files(temp_files, zip_name, prefix="",
                                    enabled=config_dict['Main']['zip'])
 
-                log_status(attempt, slctd_indx, status)
+                log_status(attempt, slctd_indx, status, n_force_calls)
                 any_attempt_succeeded = True
 
             except Exception as e:

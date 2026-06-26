@@ -152,6 +152,40 @@ def _maybe_gaussian(disp_dict, center_idx, p=0.1):
         return {"displacement_center": int(center_idx)}
     return disp_dict
 
+def _swap_prob(config_dict):
+    """Probability of swapping a directed displacement for ASE Gaussian noise.
+    Reads [ourDimer] gaussian_swap_prob; default 0.1 reproduces the old hardcoded
+    value. 0.0 disables the swap entirely, 1.0 always uses Gaussian noise.
+    """
+    if config_dict is None:
+        return 0.1
+    return config_dict["ourDimer"].get("gaussian_swap_prob", 0.1)
+
+
+def _resolve_attempts_per_type(num_per_type, reaction_types_list):
+    """Map num_attempts_per_type onto a per-type count list.
+
+    - int or None  -> original behavior: same count for every type.
+    - list         -> new behavior: one count per type, aligned by position;
+                      must match the number of reaction types.
+    """
+    if isinstance(num_per_type, list):
+        counts = [int(x) for x in num_per_type]
+        if len(counts) != len(reaction_types_list):
+            raise ValueError(
+                f"[ourDimer] num_attempts_per_type has {len(counts)} values but "
+                f"reaction_types has {len(reaction_types_list)} entries. Give one "
+                f"count per type (aligned by position), or a single integer for all.")
+        return counts
+    n = int(num_per_type) if num_per_type is not None else 1
+    return [n] * len(reaction_types_list)
+
+
+def _attempt_count_max(num_per_type):
+    """Largest attempt count implied by num_attempts_per_type (int or list)."""
+    if isinstance(num_per_type, list):
+        return max((int(x) for x in num_per_type), default=1)
+    return int(num_per_type) if num_per_type is not None else 1
 
 # --- Element sampling pools ---
 
@@ -207,6 +241,7 @@ def get_vacancy_attempts(atoms, config_dict, num_attempts):
     on the primary atom (allows the dimer to discover unexpected reaction paths).
     """
     cell = atoms.get_cell()
+    p = _swap_prob(config_dict)
     i_idx, j_idx = neighbor_list('ij', atoms, 3.5)
 
     num_attempts = min(num_attempts, len(atoms))
@@ -240,7 +275,7 @@ def get_vacancy_attempts(atoms, config_dict, num_attempts):
             atoms_new.info['reaction_type'] = 'vacancy'
             images.append(atoms_new)
             displacement_dicts.append(_maybe_gaussian(
-                {"displacement_vector": disp_vector, "method": "vector"}, new_nn_idx))
+                {"displacement_vector": disp_vector, "method": "vector"}, new_nn_idx, p=p))
             selected_indices.append(rm_idx)
 
         elif mechanism == 1:
@@ -267,7 +302,7 @@ def get_vacancy_attempts(atoms, config_dict, num_attempts):
                 atoms_new.info['reaction_type'] = 'vacancy'
                 images.append(atoms_new)
                 displacement_dicts.append(_maybe_gaussian(
-                    {"displacement_vector": disp_vector, "method": "vector"}, new_nn_idx))
+                    {"displacement_vector": disp_vector, "method": "vector"}, new_nn_idx, p=p))
                 selected_indices.append(rm_idx)
                 continue
 
@@ -285,7 +320,7 @@ def get_vacancy_attempts(atoms, config_dict, num_attempts):
             atoms_new.info['reaction_type'] = 'vacancy'
             images.append(atoms_new)
             displacement_dicts.append(_maybe_gaussian(
-                {"displacement_vector": disp_vector, "method": "vector"}, new_nnn_idx))
+                {"displacement_vector": disp_vector, "method": "vector"}, new_nnn_idx, p=p))
             selected_indices.append(rm_idx)
 
         else:  # mechanism == 2
@@ -313,7 +348,7 @@ def get_vacancy_attempts(atoms, config_dict, num_attempts):
             atoms_new.info['reaction_type'] = 'vacancy'
             images.append(atoms_new)
             displacement_dicts.append(_maybe_gaussian(
-                {"displacement_vector": disp_vector, "method": "vector"}, new_nn_idx))
+                {"displacement_vector": disp_vector, "method": "vector"}, new_nn_idx, p=p))
             selected_indices.append(rm_idx)
 
     return images, displacement_dicts, selected_indices
@@ -321,7 +356,7 @@ def get_vacancy_attempts(atoms, config_dict, num_attempts):
 
 # --- Hop attempts (interstitial mechanism) ---
 
-def get_hop_reuse_attempts(atoms, num_attempts):
+def get_hop_reuse_attempts(atoms, num_attempts, config_dict=None):
     """Displace an existing lattice atom halfway toward its nearest interstitial site.
 
     No atoms are added or removed. The directed displacement gives the dimer a
@@ -336,6 +371,7 @@ def get_hop_reuse_attempts(atoms, num_attempts):
         return [None] * num_attempts, [None] * num_attempts, [-1] * num_attempts
 
     cell = atoms.get_cell()
+    p = _swap_prob(config_dict)
     positions = atoms.get_positions()
     weights = _get_atom_selection_weights(atoms)
     site_idx_list = _shuffled_site_indices(len(sites), num_attempts)
@@ -360,13 +396,13 @@ def get_hop_reuse_attempts(atoms, num_attempts):
 
         images.append(atoms_new)
         displacement_dicts.append(_maybe_gaussian(
-            {"displacement_vector": disp_vector, "method": "vector"}, atom_idx))
+            {"displacement_vector": disp_vector, "method": "vector"}, atom_idx, p=p))
         selected_indices.append(int(atom_idx))
 
     return images, displacement_dicts, selected_indices
 
 
-def get_hop_insert_attempts(atoms, num_attempts):
+def get_hop_insert_attempts(atoms, num_attempts, config_dict=None):
     """Insert a new small atom at an interstitial site, displace halfway to nearest neighbor site.
 
     With 10% probability, Gaussian noise is used instead.
@@ -378,6 +414,7 @@ def get_hop_insert_attempts(atoms, num_attempts):
         return [None] * num_attempts, [None] * num_attempts, [-1] * num_attempts
 
     cell = atoms.get_cell()
+    p = _swap_prob(config_dict)
     site_idx_list = _shuffled_site_indices(len(sites), num_attempts)
 
     images = []
@@ -403,7 +440,7 @@ def get_hop_insert_attempts(atoms, num_attempts):
 
         images.append(atoms_new)
         displacement_dicts.append(_maybe_gaussian(
-            {"displacement_vector": disp_vector, "method": "vector"}, new_atom_idx))
+            {"displacement_vector": disp_vector, "method": "vector"}, new_atom_idx, p=p))
         selected_indices.append(int(new_atom_idx))
 
     return images, displacement_dicts, selected_indices
@@ -411,7 +448,7 @@ def get_hop_insert_attempts(atoms, num_attempts):
 
 # --- Kickout attempts (interstitialcy / kick-out mechanism) ---
 
-def get_kickout_reuse_attempts(atoms, num_attempts):
+def get_kickout_reuse_attempts(atoms, num_attempts, config_dict=None):
     """Interstitialcy kick-out using only existing atoms (no atoms added or removed).
 
     For each attempt:
@@ -431,6 +468,7 @@ def get_kickout_reuse_attempts(atoms, num_attempts):
         return [None] * num_attempts, [None] * num_attempts, [-1] * num_attempts
 
     cell = atoms.get_cell()
+    p = _swap_prob(config_dict)
     positions = atoms.get_positions()
     weights = _get_atom_selection_weights(atoms)
     site_idx_list = _shuffled_site_indices(len(sites), num_attempts)
@@ -466,13 +504,13 @@ def get_kickout_reuse_attempts(atoms, num_attempts):
 
         images.append(atoms_new)
         displacement_dicts.append(_maybe_gaussian(
-            {"displacement_vector": disp_vector, "method": "vector"}, kicker_idx))
+            {"displacement_vector": disp_vector, "method": "vector"}, kicker_idx, p=p))
         selected_indices.append(int(kicker_idx))
 
     return images, displacement_dicts, selected_indices
 
 
-def get_kickout_insert_attempts(atoms, num_attempts):
+def get_kickout_insert_attempts(atoms, num_attempts, config_dict=None):
     """Insert a new similar-sized atom at interstitial site; it kicks nearest lattice atom out.
 
     1. Sample a new element with covalent radius similar to host (Gaussian weight).
@@ -489,6 +527,7 @@ def get_kickout_insert_attempts(atoms, num_attempts):
         return [None] * num_attempts, [None] * num_attempts, [-1] * num_attempts
 
     cell = atoms.get_cell()
+    p = _swap_prob(config_dict)
     positions = atoms.get_positions()
     site_idx_list = _shuffled_site_indices(len(sites), num_attempts)
 
@@ -521,7 +560,7 @@ def get_kickout_insert_attempts(atoms, num_attempts):
 
         images.append(atoms_new)
         displacement_dicts.append(_maybe_gaussian(
-            {"displacement_vector": disp_vector, "method": "vector"}, inserted_idx))
+            {"displacement_vector": disp_vector, "method": "vector"}, inserted_idx, p=p))
         selected_indices.append(int(inserted_idx))
 
     return images, displacement_dicts, selected_indices
@@ -575,7 +614,7 @@ def _build_neighbor_dict(atoms, cutoff=3.5):
     return neighbors_dict
 
 
-def _make_ring_attempt(atoms, neighbors_dict, cell, ring_size, reaction_type):
+def _make_ring_attempt(atoms, neighbors_dict, cell, ring_size, reaction_type, p=0.1):
     """Create a single ring swap attempt. Returns (image, disp_dict, index) or None."""
     seed = random.randrange(len(atoms))
     ring = _find_ring(neighbors_dict, seed, ring_size)
@@ -610,7 +649,7 @@ def _make_ring_attempt(atoms, neighbors_dict, cell, ring_size, reaction_type):
 
     atoms_new.info['reaction_type'] = reaction_type
     disp_dict = {"displacement_vector": disp_vector, "method": "vector"}
-    return (atoms_new, _maybe_gaussian(disp_dict, int(ring[0])), int(ring[0]))
+    return (atoms_new, _maybe_gaussian(disp_dict, int(ring[0]), p=p), int(ring[0]))
 
 
 def get_ring_attempts(atoms, config_dict, num_attempts):
@@ -632,11 +671,12 @@ def get_ring_attempts(atoms, config_dict, num_attempts):
 
     neighbors_dict = _build_neighbor_dict(atoms)
     cell = atoms.get_cell()
+    p = _swap_prob(config_dict)
 
     images, displacement_dicts, selected_indices = [], [], []
     for _ in range(num_attempts):
         size = random.choice(ring_sizes)
-        result = _make_ring_attempt(atoms, neighbors_dict, cell, size, 'ring')
+        result = _make_ring_attempt(atoms, neighbors_dict, cell, size, 'ring', p=p)
         if result:
             images.append(result[0])
             displacement_dicts.append(result[1])
@@ -880,10 +920,10 @@ def get_initial_guess_attempts(atoms):
 
 _BULK_REACTION_TYPE_DISPATCH = {
     "vacancy": lambda atoms, config_dict, n: get_vacancy_attempts(atoms, config_dict, n),
-    "hop_reuse": lambda atoms, config_dict, n: get_hop_reuse_attempts(atoms, n),
-    "hop_insert": lambda atoms, config_dict, n: get_hop_insert_attempts(atoms, n),
-    "kickout_reuse": lambda atoms, config_dict, n: get_kickout_reuse_attempts(atoms, n),
-    "kickout_insert": lambda atoms, config_dict, n: get_kickout_insert_attempts(atoms, n),
+    "hop_reuse": lambda atoms, config_dict, n: get_hop_reuse_attempts(atoms, n, config_dict),
+    "hop_insert": lambda atoms, config_dict, n: get_hop_insert_attempts(atoms, n, config_dict),
+    "kickout_reuse": lambda atoms, config_dict, n: get_kickout_reuse_attempts(atoms, n, config_dict),
+    "kickout_insert": lambda atoms, config_dict, n: get_kickout_insert_attempts(atoms, n, config_dict),
     "ring": lambda atoms, config_dict, n: get_ring_attempts(atoms, config_dict, n),
     "initial_guess": lambda atoms, config_dict, n: get_initial_guess_attempts(atoms),
 }
@@ -925,11 +965,11 @@ def get_attempts(atoms, config_dict):
         dataset_type = config_dict["ourDimer"]["dataset_type"]
         if dataset_type == "bulk":
             num_per_type = config_dict["ourDimer"].get("num_attempts_per_type", 1)
-            if num_per_type is not None and num_per_type > 1:
+            if _attempt_count_max(num_per_type) > 1:
                 warnings.warn(f"'initial_guess' always produces 1 attempt — ignoring num_attempts_per_type={num_per_type}")
         elif dataset_type == "oc":
             num_per_type = config_dict["ourDimer"].get("num_attempts_per_type", 1)
-            if num_per_type is not None and num_per_type > 1:
+            if _attempt_count_max(num_per_type) > 1:
                 warnings.warn(f"'initial_guess' always produces 1 attempt — ignoring num_attempts_per_type={num_per_type}")
             # Apply OC constraints (fix substrate atoms)
             tags = atoms.get_tags()
@@ -955,13 +995,14 @@ def get_attempts(atoms, config_dict):
                              "Please specify reaction types (e.g., 'vacancy') in config.ini")
 
         num_per_type = config_dict["ourDimer"].get("num_attempts_per_type", 1)
+        counts = _resolve_attempts_per_type(num_per_type, reaction_types_list)
 
-        for rtype in reaction_types_list:
+        for rtype, n_attempts in zip(reaction_types_list, counts):
             if rtype not in _BULK_REACTION_TYPE_DISPATCH:
                 supported = ", ".join(_BULK_REACTION_TYPE_DISPATCH.keys())
                 raise ValueError(f"Unknown bulk reaction type: '{rtype}'. "
                                  f"Supported types: {supported}")
-            imgs, dds, idxs = _BULK_REACTION_TYPE_DISPATCH[rtype](atoms, config_dict, num_per_type)
+            imgs, dds, idxs = _BULK_REACTION_TYPE_DISPATCH[rtype](atoms, config_dict, n_attempts)
             images.extend(imgs)
             displacement_dicts.extend(dds)
             selected_indices.extend(idxs)
@@ -980,13 +1021,14 @@ def get_attempts(atoms, config_dict):
                 "Supported OC types: " + ", ".join(_OC_REACTION_TYPE_DISPATCH.keys()))
 
         num_per_type = config_dict["ourDimer"].get("num_attempts_per_type", 1)
+        counts = _resolve_attempts_per_type(num_per_type, reaction_types_list)
 
-        for rtype in reaction_types_list:
+        for rtype, n_attempts in zip(reaction_types_list, counts):
             if rtype not in _OC_REACTION_TYPE_DISPATCH:
                 supported = ", ".join(_OC_REACTION_TYPE_DISPATCH.keys())
                 raise ValueError(f"Unknown OC reaction type: '{rtype}'. "
                                  f"Supported types: {supported}")
-            imgs, dds, idxs = _OC_REACTION_TYPE_DISPATCH[rtype](atoms, config_dict, num_per_type)
+            imgs, dds, idxs = _OC_REACTION_TYPE_DISPATCH[rtype](atoms, config_dict, n_attempts)
             images.extend(imgs)
             displacement_dicts.extend(dds)
             selected_indices.extend(idxs)

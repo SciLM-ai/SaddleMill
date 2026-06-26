@@ -188,12 +188,13 @@ def process_rank(rank, out_path):
                 for i, row in enumerate(csv.reader(f), start=1):
                     if not row:
                         continue
-                    if len(row) != 5:
+                    if len(row) < 5:
                         raise RuntimeError(
-                            f"{csv_path}:{i}: expected 5 columns, got {row}"
+                            f"{csv_path}:{i}: expected >=5 columns, got {row}"
                         )
-                    src, mpi, attempt, atom, status = row
-                    src, mpi, attempt, atom = int(src), int(mpi), int(attempt), int(atom)
+                    src, mpi, attempt, atom = (int(row[0]), int(row[1]),
+                                               int(row[2]), int(row[3]))
+                    status = row[-1]
                     if mpi != rank:
                         raise RuntimeError(
                             f"{csv_path}:{i}: mpi_rank {mpi} != expected rank {rank}"

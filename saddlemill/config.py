@@ -82,11 +82,15 @@ class ConfigManager:
             "reaction_types": None, # Bulk: vacancy hop_reuse hop_insert kickout_reuse kickout_insert ring initial_guess
                                    # OC: adsorbate_atom adsorbate_atom_neighbors adsorbate diffusion rotation adsorbate_surface surface custom initial_guess
             "num_attempts_per_type": 1,
+            "gaussian_swap_prob": 0.1,
             "ring_sizes": "3 4",
             "supercell": True,
             "delocalization_threshold": 0.8,
             "extension_check_fmax": 0.4,
             "extension_check_curvature": -0.2,
+            "engine": "ase",            # ase (stock ASE dimer) | kappa
+            "kappa_beta": 5.0,          # only used when engine = kappa
+            "kappa_recover_fmax": 0.3,  # only used when engine = kappa
             "vasp_command": None,
             "vasp_ncore": None,
         },
