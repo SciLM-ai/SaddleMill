@@ -3,6 +3,24 @@ from ase.mep.dimer import DimerEigenmodeSearch, MinModeAtoms, perpendicular_vect
 
 norm = np.linalg.norm
 
+
+class IsolatedDimerControl(DimerControl):
+    """DimerControl that owns its own parameter dict.
+
+    ASE's DimerControl stores `parameters` as a class-level attribute and never
+    copies it per instance, so EVERY DimerControl in the process shares one dict:
+    constructing a second control overwrites the rotation parameters
+    (max_num_rot, f_rot_max, ...) of every control built earlier. The kappa-dimer
+    needs two live controls at once (Phase-A `control` and Phase-B `kappa_control`)
+    holding different values, so the shared dict silently collapses them to
+    whichever was built last. Snapshotting the defaults onto the instance before
+    super().__init__() fills them in keeps each control independent. Stored values
+    are scalars, so a shallow copy is sufficient.
+    """
+    def __init__(self, *args, **kwargs):
+        self.parameters = dict(type(self).parameters)
+        super().__init__(*args, **kwargs)
+
 class KappaEigenmodeSearch(DimerEigenmodeSearch):
     """
     Phase B Rotation: Constrains the dimer rotation to the isopotential hyperplane.
@@ -63,9 +81,11 @@ class KappaMinModeAtoms(MinModeAtoms):
         if kappa_control is not None:
             self.kappa_control = kappa_control
         else:
-            # tighter rotation than Phase A: converge kappa each step
-            self.kappa_control = DimerControl(
-                dimer_separation=self.control.get_parameter('dimer_separation'),
+            # tighter rotation than Phase A: converge kappa each step.
+            # IsolatedDimerControl so building this does NOT clobber self.control's
+            # rotation parameters (see IsolatedDimerControl docstring).
+            self.kappa_control = IsolatedDimerControl(
+               dimer_separation=self.control.get_parameter('dimer_separation'),
                 f_rot_min=0.01, f_rot_max=0.50,   # don't bail after one rotation
                 max_num_rot=8,
                 logfile=self.control.logfile, eigenmode_logfile=self.control.logfile)  
