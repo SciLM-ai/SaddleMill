@@ -39,17 +39,19 @@ def _setup_dimer(atoms, calc, eigenmode=None, displacement_dict=None,
     """
 
     atoms.calc = calc
-    d_control = DimerControl(logfile=control_logfile, **(dimer_control_kwargs or {}))
     eig_kw = {'eigenmodes': [np.array(eigenmode)]} if eigenmode is not None else {}
 
     if engine == "kappa":
-        from saddlemill.dimertools.kappa_dimer import KappaMinModeAtoms
+        from saddlemill.dimertools.kappa_dimer import KappaMinModeAtoms, IsolatedDimerControl
+
+        d_control = IsolatedDimerControl(logfile=control_logfile, **(dimer_control_kwargs or {}))
         kw = dict(kappa_kwargs or {})
         if kappa_control_kwargs:
-            kw["kappa_control"] = DimerControl(logfile=control_logfile,
-                                               **kappa_control_kwargs)
+            kw["kappa_control"] = IsolatedDimerControl(logfile=control_logfile, **kappa_control_kwargs)
+
         d_atoms = KappaMinModeAtoms(atoms, control=d_control, **eig_kw, **kw)
     elif engine == "ase":
+        d_control = DimerControl(logfile=control_logfile, **(dimer_control_kwargs or {}))
         d_atoms = MinModeAtoms(atoms, d_control, **eig_kw)
     else:
         raise ValueError(f"Unknown [ourDimer] engine={engine!r}; expected 'ase' or 'kappa'.")
