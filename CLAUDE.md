@@ -60,7 +60,7 @@ Auxiliary entry points:
 
 > **Config-section philosophy (do not violate).** A config section named after an
 > external class/library — `[Vasp]`, `[FAIRChemCalculator]`, `[DimerControl]`,
-> `[BaseNEB]`, `[MDMin]`/`[LBFGS]`/`[FIRE]` — is a **pure pass-through**: every key
+> `[BaseNEB]`, `[MDMin]`/`[LBFGS]`/`[FIRE]`/`[Kappa]` — is a **pure pass-through**: every key
 > in it is handed verbatim as `**kwargs` to that class (`Vasp(**...)`,
 > `DimerControl(**...)`, etc.). **Never** add a SaddleMill-specific key to one of
 > these — it would be forwarded to the external class (e.g. ASE's `Vasp` writes
@@ -119,8 +119,11 @@ Auxiliary entry points:
 - Writes `reaction_type` to `atoms.info` for each attempt
 - **Per-attempt error handling**: Each attempt has its own try/except; one failure doesn't abort remaining attempts.
 - **Consecutive error tracking**: Structure-level `consecutive_errors` counter (from `init_function`). All attempts fail → increment; any success → reset to 0. At `max_consecutive_errors`, worker calls `sys.exit(1)` for executorlib restart.
-- **Per-attempt execution**: Accepts `entries_to_run` (set of attempt_ids) and `continuation_data` (dict: attempt_id → Atoms). Calls `get_attempts()` on original input, then per attempt: skips if not in `entries_to_run`, uses `continuation_data[attempt_id]` if available (near-zero displacement), else fresh attempt. Eigenmode/reaction_type read from top-level `.info` first, `orig_info` fallback.
-
+- **Per-attempt execution**: Accepts `entries_to_run` (set of attempt_ids) and `continuation_data` (dict: attempt_id → Atoms). Calls `get_attempts()` on original input, then per attempt: skips if not in `entries_to_run`, uses `continuation_data[attempt_id]` if available (near-zero displacement),
+- else fresh attempt. Eigenmode/reaction_type read from top-level `.info` first, `orig_info` fallback.
+- **Engine Selection**: Supports both standard ASE dimer (`engine = dimer`, default) and the Kappa dimer (`engine = kappa`). The Kappa dimer utilizes a Phase A/Phase B double rotation scheme to constrain the dimer rotation to the isopotential hyperplane via `KappaMinModeAtoms`. It smoothly blends translation forces using a switching function governed by `beta` (steepness) and automatically recovers to the standard normal dimer method when maximum atomic forces drop below `recover_fmax`.
+- **Reaction Attempts Mapping**: `num_attempts_per_type` accepts either a single integer (applied globally to all configured `reaction_types`) or a space-separated list of integers mapping 1:1 to the `reaction_types` list.
+- **Status CSV Tracking**: The Dimer status CSV now records the total number of **force calls** for each attempt, providing a direct metric for computational cost alongside the convergence status.
 ### `dimertools/structure_edit.py` - Reaction Types for Dimer
 Reaction types configured via `reaction_types` (space-separated list). Bulk and OC dispatched via `_BULK_REACTION_TYPE_DISPATCH` / `_OC_REACTION_TYPE_DISPATCH`.
 
@@ -163,8 +166,7 @@ Adsorbate atoms: tag=2 only (no fallback). Substrate (tag=0) fixed via `FixAtoms
 - Element sampling: `hop_insert` weights by 1/covalent_radius via `_sample_hop_insert_element` (H favored). `kickout_insert` uses Gaussian weight centered on host avg covalent radius (σ=0.2 Å) from 30 metals/semiconductors via `_sample_kickout_insert_element`.
 - `_get_atom_selection_weights(atoms)`: inverse-covalent-radius weights for picking which existing atom to displace (small atoms favored).
 - `_shuffled_site_indices(num_sites)`: cycles through interstitial sites without repeats, generator pattern.
-- `_maybe_gaussian(displacement, atoms, gauss_prob=0.1, gauss_std=0.4)`: bulk-types pass directed displacements through this — with `gauss_prob` it returns broad Gaussian noise instead, adding an exploration tail.
-- `turn_into_supercell(atoms, min_length=7.0)`: Preserves `.info` across `make_supercell()`. Enforces min 7 Å cell dimensions (fairchem uses 5 Å radius graph cutoff). Called in `get_attempts()` for all types except `initial_guess` (controlled by `supercell` config, default `True`).
+- `_maybe_gaussian(displacement, atoms, gauss_prob=0.1, gauss_std=0.4)`: bulk-types pass directed displacements through this. Controlled by `[ourDimer] gaussian_swap_prob` (which overrides the default `gauss_prob`), this adds an exploration tail by replacing the directed vector with broad Gaussian noise on the same atom set.- `turn_into_supercell(atoms, min_length=7.0)`: Preserves `.info` across `make_supercell()`. Enforces min 7 Å cell dimensions (fairchem uses 5 Å radius graph cutoff). Called in `get_attempts()` for all types except `initial_guess` (controlled by `supercell` config, default `True`).
 - Dispatch: `get_attempts()` selects dispatch dict by `dataset_type`. `initial_guess` handled early (before bulk/oc branch) and is also registered in both `_BULK_REACTION_TYPE_DISPATCH` and `_OC_REACTION_TYPE_DISPATCH`.
 - `_safe_normalize(vec)`: Returns random unit vector if norm ≈ 0.
 - `_build_neighbor_dict(atoms)`: Skips self-interactions (`i == j`) in small periodic cells.
@@ -336,12 +338,35 @@ allow_shared_calculator = True
 dataset_type = oc            # oc | bulk
 reaction_types = vacancy     # Bulk: vacancy hop_reuse hop_insert kickout_reuse kickout_insert ring initial_guess
                              # OC: adsorbate_atom adsorbate_atom_neighbors adsorbate diffusion rotation adsorbate_surface surface custom initial_guess
-num_attempts_per_type = 1
+num_attempts_per_type = 1    # 5 5 5 10 5 5 5 10 5  Multiple numbers will give corresponding attempts per reaction type (Ex: 5 adsorbate_atom, 5 adsorbate_atom_neighbors, 5 adsorbate, 10 diffusion ... etc.)
 ring_sizes = 3 4             # For 'ring' type (bulk only)
+gaussian_swap_prob = 0.1     # Probability bulk reactions are rerouted to a gaussian kick
 supercell = True             # Min 7 Å expansion
 delocalization_threshold = 0.8
 extension_check_fmax = 0.4
 extension_check_curvature = -0.2
+engine = ase                 # ase (default) | kappa
+kappa_beta = 5.0,          # only used when engine = kappa
+kappa_recover_fmax = 0.3  # only used when engine = kappa
+
+[DimerControl]
+max_num_rot = 1
+f_rot_max = 1.0
+f_rot_min = 0.1
+initial_eigenmode_method = gauss
+maximum_translation = 0.1
+dimer_separation = 0.01
+extrapolate_forces = True
+displacement_radius = 3.5 # need to add displacement_radius or number_of_displacement_atoms to avoid errors in generating biased reaction guesses
+number_of_displacement_atoms = 10
+
+[Kappa]
+# Acts identically to [DimerControl] but configures the Phase B constrained rotation 
+# for KappaMinModeAtoms (only used when engine = kappa).
+max_num_rot = 8
+f_rot_min = 0.01
+f_rot_max = 0.50
+dimer_separation = 0.01
 
 [ourMinimization]
 relax_cell = False
