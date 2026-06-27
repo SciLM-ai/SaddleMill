@@ -106,7 +106,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
         backup_flux_logs(rank)
         sys.exit(1)
 
-    def log_status(attempt, slctd_indx, status_msg):
+    def log_status(attempt, slctd_indx, status_msg, n_force_calls=0):
         with open(status_file, 'a') as f:
             f.write(f'{i},{rank},{attempt},{slctd_indx},{n_force_calls},"{status_msg}"\n')
 
@@ -260,7 +260,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                 atoms.info['eigenmode'] = eigenmode
                 atoms.info['curvature'] = float(curvature)
                 atoms.info['n_force_calls'] = int(n_force_calls)
-                # atoms.info['converged'] = 1 if converged else 0
+                atoms.info['converged'] = 1 if converged else 0
                 atoms.info['src_index'] = i
                 atoms.info['attempt_id'] = attempt
                 atoms.info['stoprun'] = 1 if stopped_early else 0
