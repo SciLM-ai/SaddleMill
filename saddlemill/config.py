@@ -89,7 +89,7 @@ class ConfigManager:
             "extension_check_fmax": 0.4,
             "extension_check_curvature": -0.2,
             "engine": "ase",            # ase (stock ASE dimer) | kappa
-            "kappa_beta": 5.0,          # only used when engine = kappa
+            "kappa_beta": 2.0,          # only used when engine = kappa
             "kappa_recover_fmax": 0.3,  # only used when engine = kappa
             "vasp_command": None,
             "vasp_ncore": None,
