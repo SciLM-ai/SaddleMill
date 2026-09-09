@@ -524,6 +524,24 @@ def read_status_csv_rows(method_name, directory="."):
     return rows
 
 
+def append_status_row(status_file, fields):
+    """Append one status row, quoted per RFC 4180.
+
+    The last field is free-form status text carrying raw VASP/MPI output. That text
+    contains newlines and literal double quotes -- MPI emits ``calling "abort".`` on
+    every rank abort -- so hand-formatting the row as ``f'{i},{rank},"{msg}"'`` ends
+    the field at the first interior quote and shreds the rest of the message into
+    fragment rows. csv.writer doubles interior quotes, which keeps the record intact.
+
+    QUOTE_NONNUMERIC plus a "\n" line terminator preserves the historical on-disk
+    shape byte for byte -- numeric ids unquoted, status text quoted, Unix newlines --
+    so existing readers, greps and archived CSVs are unaffected. The only difference
+    is that interior quotes are now doubled, as RFC 4180 requires.
+    """
+    with open(status_file, "a", newline="") as fh:
+        csv.writer(fh, quoting=csv.QUOTE_NONNUMERIC, lineterminator="\n").writerow(fields)
+
+
 def _normalize_run_jobs(run_jobs_value):
     """Convert parsed run_jobs config value into a set of job categories."""
     if isinstance(run_jobs_value, str):

@@ -13,6 +13,7 @@ from ase.calculators.singlepoint import SinglePointCalculator
 from ase.io import Trajectory
 from ase.mep.neb import NEB, NEBTools, NEBState
 from saddlemill.catsunami.ocpneb import OCPNEB, _find_segment_ci
+from saddlemill.config import append_status_row
 from saddlemill.dimeropt import _setup_dimer
 from saddlemill.tools import (backup_flux_logs, get_task_name, remove_vasp_heavies,
                               finalize_if_vasp_interactive, vasp_incar_kwargs,
@@ -213,8 +214,7 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
     task_name = get_task_name(config_dict)
 
     def log_status(status_msg, sub_band_id=0):
-        with open(status_file, 'a') as f:
-            f.write(f'{i},{rank},{sub_band_id},"{status_msg}"\n')
+        append_status_row(status_file, [i, rank, sub_band_id, status_msg])
 
     perform_aseidpp = False
     num_images = len(images)
