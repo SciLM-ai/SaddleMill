@@ -863,7 +863,7 @@ def _analytic_hessian(atoms, chunk=1):
 
 
 def hessian_outputs(atoms, nev_store=8, tol=1e-2, chunk=1,
-                    store_hessian=False, store_eigenmodes=True):
+                    compute_hessian=False, compute_eigenmodes=True):
     """Exact Hessian results for a structure, as a dict to stamp onto output.
 
     Returns ``{}`` when no analytical Hessian is available (direct-force model,
@@ -872,12 +872,12 @@ def hessian_outputs(atoms, nev_store=8, tol=1e-2, chunk=1,
 
     Two independent switches; the Hessian is computed once either way:
 
-    * ``store_hessian`` keeps the Hessian itself - key ``hessian``: the full
+    * ``compute_hessian`` keeps the Hessian itself - key ``hessian``: the full
       (3N, 3N) Cartesian matrix in eV/A^2, atom order, NOT projected for
       constraints (rows/columns of fixed atoms hold the model's raw values). It
       is what `sellaopt` accepts as an exact starting Hessian
       (``[ourSella] initial_hessian = True``). No diagonalization is done for it.
-    * ``store_eigenmodes`` diagonalizes the constraint-projected Hessian and
+    * ``compute_eigenmodes`` diagonalizes the constraint-projected Hessian and
       keeps the spectrum instead of the matrix: ``hessian_eigenvalues`` (lowest
       ``nev_store``; all when ``nev_store`` < 0), ``hessian_eigenmodes`` (the
       matching eigenvectors, (k, N, 3) in full Cartesian, zero on fixed atoms),
@@ -896,9 +896,9 @@ def hessian_outputs(atoms, nev_store=8, tol=1e-2, chunk=1,
     if H is None:
         return {}
     out = {"hessian_wall_s": float(time.time() - t0)}
-    if store_hessian:
+    if compute_hessian:
         out["hessian"] = H
-    if not store_eigenmodes:
+    if not compute_eigenmodes:
         return out
 
     evals, evecs = np.linalg.eigh(_project_free(H, atoms))
@@ -928,13 +928,11 @@ def hessian_outputs(atoms, nev_store=8, tol=1e-2, chunk=1,
 
 
 def hessian_request(sp):
-    """``(store_hessian, store_eigenmodes)`` requested by an ``[ourSinglePoint]``
-    section. The retired ``compute_hessian = True`` means ``store_eigenmodes``
-    (what it always produced); ConfigManager renames it on read, and this also
-    covers config dicts built in code."""
+    """``(compute_hessian, compute_eigenmodes)`` requested by an ``[ourSinglePoint]``
+    section."""
     sp = sp or {}
-    return (bool(sp.get("store_hessian", False)),
-            bool(sp.get("store_eigenmodes", False) or sp.get("compute_hessian", False)))
+    return (bool(sp.get("compute_hessian", False)),
+            bool(sp.get("compute_eigenmodes", False)))
 
 
 def hessian_index(atoms, nev=4, eps=2e-3, tol=1e-2, maxiter=300, analytic=True):

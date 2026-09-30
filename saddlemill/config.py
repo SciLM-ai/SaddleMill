@@ -48,19 +48,19 @@ class ConfigManager:
             # Exact analytical Hessian for every frame (FAIRChem, conservative
             # models only; forces frames_per_job=1). Two independent switches -
             # the Hessian is computed once if either is on:
-            #   store_hessian    -> info['hessian']: the full (3N, 3N) Cartesian
-            #                       Hessian, unprojected; no diagonalization. What
-            #                       [ourSella] initial_hessian consumes.
-            #   store_eigenmodes -> diagonalize the constraint-projected Hessian and
-            #                       store hessian_eigenvalues / hessian_eigenmodes
-            #                       (lowest hessian_nev_store) / hessian_index /
-            #                       hessian_nzero / eigenmode / curvature, not the
-            #                       matrix. eigenmode seeds the next Dimer/Sella run.
+            #   compute_hessian    -> info['hessian']: the full (3N, 3N) Cartesian
+            #                         Hessian, unprojected; no diagonalization.
+            #                         What [ourSella] initial_hessian consumes.
+            #   compute_eigenmodes -> diagonalize the constraint-projected Hessian
+            #                         and store hessian_eigenvalues /
+            #                         hessian_eigenmodes (lowest hessian_nev_store) /
+            #                         hessian_index / hessian_nzero / eigenmode /
+            #                         curvature, not the matrix. eigenmode seeds the
+            #                         next Dimer/Sella run.
             # Either also stamps hessian_wall_s (time spent on the Hessian).
-            # The retired key compute_hessian = True is read as store_eigenmodes.
-            "store_hessian": False,
-            "store_eigenmodes": False,
-            "hessian_nev_store": 8,   # eigenpairs to keep with store_eigenmodes; -1 = all
+            "compute_hessian": False,
+            "compute_eigenmodes": False,
+            "hessian_nev_store": 8,   # eigenpairs to keep with compute_eigenmodes; -1 = all
             "hessian_tol": 1e-2,      # eigenvalue < -tol counts toward the index
             "hessian_chunk": 1,       # vmap rows per batch; raise for speed if memory allows
             "frames_per_job": 1,  # 1 (default) | 3. With 3, each executorlib job processes a triplet (e.g. DM min1/TS/min2) in a single batched FAIRChem forward pass. VASP requires 1.
@@ -144,7 +144,7 @@ class ConfigManager:
             "index_tol": 1e-2,
             # Start Sella from the exact Hessian stored on the input frame
             # (info['hessian'] or orig_info['hessian'], as written by a SinglePoint
-            # pass with store_hessian = True) instead of an uninformed model.
+            # pass with compute_hessian = True) instead of an uninformed model.
             # Frames without one run as usual (with a warning). Not applied to
             # continuations; the consumed Hessian is dropped from the output.
             "initial_hessian": False,
@@ -200,7 +200,6 @@ class ConfigManager:
     _RENAMED_KEYS = [
         ("ourNEB", "intermediate_minima_check_interval", "intermediate_minima_check_step"),
         ("ourNEB", "add_images_check_interval", "add_images_step"),
-        ("ourSinglePoint", "compute_hessian", "store_eigenmodes"),
     ]
 
     def _migrate_renamed_keys(self):
@@ -332,16 +331,15 @@ def load_method(config_dict):
                 f"VaspInteractive; got Calculator={calc_name!r}."
             )
         _sp = config_dict["ourSinglePoint"]
-        if (_sp.get("store_hessian") or _sp.get("store_eigenmodes")
-                or _sp.get("compute_hessian")):
+        if _sp.get("compute_hessian") or _sp.get("compute_eigenmodes"):
             if calc_name != "FAIRChemCalculator":
                 raise NotImplementedError(
-                    "[ourSinglePoint] store_hessian / store_eigenmodes require "
+                    "[ourSinglePoint] compute_hessian / compute_eigenmodes require "
                     f"Calculator=FAIRChemCalculator; got {calc_name!r}.")
             fpj = _sp.get("frames_per_job", 1)
             if fpj != 1:
                 raise NotImplementedError(
-                    "[ourSinglePoint] store_hessian / store_eigenmodes require "
+                    "[ourSinglePoint] compute_hessian / compute_eigenmodes require "
                     "frames_per_job=1 (fairchem computes a Hessian for one system "
                     f"at a time); got {fpj}.")
         if calc_name in ("Vasp", "VaspInteractive"):

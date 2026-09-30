@@ -176,7 +176,7 @@ inside `_setup_sella()`, so every other method runs without it installed.
 - **Exact starting Hessian** (`[ourSella] initial_hessian = True`, default off):
   a Hessian stored on the input frame — `info['hessian']`, or
   `info['orig_info']['hessian']` after `load_and_sanitize`, as written by a
-  SinglePoint pass with `store_hessian = True` — is passed to Sella as `H0`, its
+  SinglePoint pass with `compute_hessian = True` — is passed to Sella as `H0`, its
   initial Hessian model (marked initialized), instead of the uninformed default.
   It must be the full (3N, 3N) Cartesian matrix (Sella projects constraints
   itself); a wrong shape is an attempt error. A frame without one runs as usual
@@ -211,7 +211,7 @@ homework. Both methods route through this one function, gated by
 indices are directly comparable. A genuine first-order saddle has exactly one
 eigenvalue below `-tol`; `n_negative >= 2` is a higher-order saddle.
 
-### Exact Hessian from a SinglePoint pass — `[ourSinglePoint] store_hessian` / `store_eigenmodes`
+### Exact Hessian from a SinglePoint pass — `[ourSinglePoint] compute_hessian` / `compute_eigenmodes`
 
 `method = SinglePoint` can compute the exact analytical Hessian of every frame
 (FAIRChem, conservative models only; requires `frames_per_job = 1`). Two
@@ -219,17 +219,19 @@ independent switches; the Hessian is computed once if either is on:
 
 | switch | stored in `.info` | diagonalization |
 |---|---|---|
-| `store_hessian = True` | `hessian`: full (3N, 3N) Cartesian matrix, eV/Å², atom order, **not** projected for constraints | none |
-| `store_eigenmodes = True` | `hessian_eigenvalues` (lowest `hessian_nev_store`, `-1` = all), `hessian_eigenmodes` ((k, N, 3), zero on fixed atoms), `hessian_index` (count < `-hessian_tol`), `hessian_nzero`, `eigenmode` (lowest mode, (N, 3)), `curvature` | of the constraint-projected Hessian (free DOF only) |
+| `compute_hessian = True` | `hessian`: full (3N, 3N) Cartesian matrix, eV/Å², atom order, **not** projected for constraints | none |
+| `compute_eigenmodes = True` | `hessian_eigenvalues` (lowest `hessian_nev_store`, `-1` = all), `hessian_eigenmodes` ((k, N, 3), zero on fixed atoms), `hessian_index` (count < `-hessian_tol`), `hessian_nzero`, `eigenmode` (lowest mode, (N, 3)), `curvature` | of the constraint-projected Hessian (free DOF only) |
 | both | all of the above | yes |
 
 Either switch also stamps `hessian_wall_s` (seconds spent on the Hessian, the
 diagonalization excluded) so its cost can be accounted for. `eigenmode` is the
 key `dimeropt`/`sellaopt` read to seed a search, and `hessian` is what
 `[ourSella] initial_hessian` consumes, so a SinglePoint pass feeds the next
-saddle search exactly. The retired `compute_hessian = True` is renamed to
-`store_eigenmodes` on read (it always produced that summary);
-`tools.hessian_request()` gives `(store_hessian, store_eigenmodes)` for a section.
+saddle search exactly. `tools.hessian_request()` gives
+`(compute_hessian, compute_eigenmodes)` for a section. **Changed meaning:** before
+commit `fe37822`, `compute_hessian = True` produced the eigen summary (what is now
+`compute_eigenmodes`); it now stores the matrix only — old configs that relied on
+it for `eigenmode` seeding must switch to `compute_eigenmodes = True`.
 
 - **Cost.** fairchem builds the Hessian as 3N vector-Jacobian products through
   the force graph and batches them with `torch.vmap`; `hessian_chunk` sets how

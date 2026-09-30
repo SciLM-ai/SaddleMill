@@ -131,7 +131,7 @@ def _setup_sella(atoms, calc, eigenmode=None, displacement_dict=None,
     eigenmode was installed as the initial mode guess.
 
     *hessian*, if given, is an exact (3N, 3N) Cartesian Hessian of the start
-    geometry (e.g. a SinglePoint ``store_hessian`` result). It becomes Sella's
+    geometry (e.g. a SinglePoint ``compute_hessian`` result). It becomes Sella's
     initial Hessian model (``PES(H0=...)``, marked initialized) instead of the
     uninformed default, so the first P-RFO step already follows the true
     curvature and Sella's first iterative diagonalization only has to correct
@@ -254,7 +254,7 @@ def sellaopt(i, config_dict, atoms_orig, calc, consecutive_errors=None,
                     eigenmode = np.array(eigenmode)
 
                 # Optional exact starting Hessian stored on the input frame (a
-                # SinglePoint store_hessian pass). It describes the INPUT geometry,
+                # SinglePoint compute_hessian pass). It describes the INPUT geometry,
                 # so it is never applied to a continuation, which starts elsewhere.
                 initial_H = None
                 if our.get("initial_hessian") and not continued:
@@ -271,7 +271,7 @@ def sellaopt(i, config_dict, atoms_orig, calc, consecutive_errors=None,
                             raise ValueError(
                                 f"stored hessian has shape {initial_H.shape}, expected "
                                 f"{(3 * len(atoms), 3 * len(atoms))} (full Cartesian, "
-                                f"as written by [ourSinglePoint] store_hessian)")
+                                f"as written by [ourSinglePoint] compute_hessian)")
 
                 attempt_calc = resolve_vasp_calc(config_dict, calc, i, attempt, "ourSella", atoms=atoms)
                 dyn, seeded = _setup_sella(

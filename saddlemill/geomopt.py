@@ -517,14 +517,14 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
                     nev_store=our_sp.get("hessian_nev_store", 8),
                     tol=our_sp.get("hessian_tol", 1e-2),
                     chunk=our_sp.get("hessian_chunk", 1),
-                    store_hessian=want_hessian,
-                    store_eigenmodes=want_eigen,
+                    compute_hessian=want_hessian,
+                    compute_eigenmodes=want_eigen,
                 )
                 if not hess_extra:
                     # No analytical Hessian available (non-conservative model, or
                     # OOM). Say so rather than silently emitting a plain SP.
-                    print(f"Rank {rank} WARNING structure {i}: store_hessian/"
-                          f"store_eigenmodes requested but no analytical Hessian "
+                    print(f"Rank {rank} WARNING structure {i}: compute_hessian/"
+                          f"compute_eigenmodes requested but no analytical Hessian "
                           f"available.", flush=True)
             ef_pairs = [(a.get_potential_energy(), a.get_forces())]
 

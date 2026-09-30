@@ -401,16 +401,15 @@ class TestSinglePointHessianConfig:
     def test_defaults_exist(self):
         from saddlemill.config import ConfigManager
         sp = ConfigManager.DEFAULTS["ourSinglePoint"]
-        for k in ("store_hessian", "store_eigenmodes", "hessian_nev_store",
+        for k in ("compute_hessian", "compute_eigenmodes", "hessian_nev_store",
                   "hessian_tol", "hessian_chunk"):
             assert k in sp, f"[ourSinglePoint] missing {k}"
-        assert sp["store_hessian"] is False and sp["store_eigenmodes"] is False, \
+        assert sp["compute_hessian"] is False and sp["compute_eigenmodes"] is False, \
             "both must be off by default"
-        assert "compute_hessian" not in sp, "retired key must not be a default"
 
-    def test_compute_hessian_is_renamed_to_store_eigenmodes(self, tmp_path):
-        """Old configs keep working: compute_hessian = True always produced the
-        eigen summary, which is exactly store_eigenmodes."""
+    def test_ini_keys_are_read_as_given(self, tmp_path):
+        """compute_hessian means the matrix only; it is not an alias of the
+        eigen summary any more."""
         import textwrap
         from saddlemill.config import ConfigManager
         ini = tmp_path / "config.ini"
@@ -421,19 +420,17 @@ class TestSinglePointHessianConfig:
             compute_hessian = True
         """))
         sp = ConfigManager(str(ini))["ourSinglePoint"]
-        assert sp["store_eigenmodes"] is True
-        assert sp["store_hessian"] is False
-        assert "compute_hessian" not in sp
+        assert sp["compute_hessian"] is True
+        assert sp["compute_eigenmodes"] is False
 
-    def test_hessian_request_reads_both_keys_and_the_retired_one(self):
+    def test_hessian_request_reads_both_keys(self):
         from saddlemill.tools import hessian_request
         assert hessian_request({}) == (False, False)
-        assert hessian_request({"store_hessian": True}) == (True, False)
-        assert hessian_request({"store_eigenmodes": True}) == (False, True)
-        assert hessian_request({"store_hessian": True, "store_eigenmodes": True}) == (True, True)
-        assert hessian_request({"compute_hessian": True}) == (False, True)
+        assert hessian_request({"compute_hessian": True}) == (True, False)
+        assert hessian_request({"compute_eigenmodes": True}) == (False, True)
+        assert hessian_request({"compute_hessian": True, "compute_eigenmodes": True}) == (True, True)
 
-    @pytest.mark.parametrize("key", ["store_hessian", "store_eigenmodes", "compute_hessian"])
+    @pytest.mark.parametrize("key", ["compute_hessian", "compute_eigenmodes"])
     def test_requires_frames_per_job_1(self, key):
         """fairchem computes a Hessian for one system at a time."""
         from saddlemill.config import load_method
@@ -446,7 +443,7 @@ class TestSinglePointHessianConfig:
         c["ourSinglePoint"]["frames_per_job"] = 1
         assert load_method(c).__name__ == "singlepoint"
 
-    @pytest.mark.parametrize("key", ["store_hessian", "store_eigenmodes"])
+    @pytest.mark.parametrize("key", ["compute_hessian", "compute_eigenmodes"])
     def test_requires_fairchem(self, key):
         from saddlemill.config import load_method
         c = make_config_dict(method="SinglePoint")
@@ -540,7 +537,7 @@ class TestConstraintProjection:
 
 
 class TestHessianStorageSwitches:
-    """store_hessian keeps the matrix, store_eigenmodes keeps the spectrum; the
+    """compute_hessian keeps the matrix, compute_eigenmodes keeps the spectrum; the
     Hessian is computed once either way. Fed a known Hessian so it runs on CPU."""
 
     EIGEN_KEYS = {"hessian_index", "hessian_nzero", "hessian_eigenvalues",
@@ -562,7 +559,7 @@ class TestHessianStorageSwitches:
     def test_hessian_only_stores_the_full_unprojected_matrix(self):
         from saddlemill.tools import hessian_outputs
         a, H = self._atoms()
-        out = hessian_outputs(a, store_hessian=True, store_eigenmodes=False)
+        out = hessian_outputs(a, compute_hessian=True, compute_eigenmodes=False)
         assert set(out) == {"hessian", "hessian_wall_s"}, "no diagonalization output expected"
         assert out["hessian"].shape == (18, 18), "full 3N x 3N, fixed atoms included"
         assert np.allclose(out["hessian"], H)
@@ -571,7 +568,7 @@ class TestHessianStorageSwitches:
     def test_eigenmodes_only_stores_the_projected_spectrum_not_the_matrix(self):
         from saddlemill.tools import hessian_outputs, _project_free
         a, H = self._atoms()
-        out = hessian_outputs(a, nev_store=4, store_hessian=False, store_eigenmodes=True)
+        out = hessian_outputs(a, nev_store=4, compute_hessian=False, compute_eigenmodes=True)
         assert "hessian" not in out
         assert self.EIGEN_KEYS <= set(out)
         ref = np.linalg.eigvalsh(_project_free(H, a))
@@ -590,13 +587,13 @@ class TestHessianStorageSwitches:
     def test_both_switches_store_both(self):
         from saddlemill.tools import hessian_outputs
         a, H = self._atoms()
-        out = hessian_outputs(a, store_hessian=True, store_eigenmodes=True)
+        out = hessian_outputs(a, compute_hessian=True, compute_eigenmodes=True)
         assert "hessian" in out and self.EIGEN_KEYS <= set(out)
 
     def test_negative_nev_store_keeps_every_eigenpair(self):
         from saddlemill.tools import hessian_outputs
         a, _ = self._atoms()
-        out = hessian_outputs(a, nev_store=-1, store_eigenmodes=True)
+        out = hessian_outputs(a, nev_store=-1, compute_eigenmodes=True)
         assert len(out["hessian_eigenvalues"]) == 12, "3 * 4 free atoms"
         assert np.asarray(out["hessian_eigenmodes"]).shape == (12, 6, 3)
 
@@ -614,7 +611,7 @@ class TestHessianStorageSwitches:
 
 def _fd_hessian(atoms, eps=1e-3):
     """Full (3N, 3N) central-difference Hessian with EMT, constraints ignored
-    (the same convention as [ourSinglePoint] store_hessian)."""
+    (the same convention as [ourSinglePoint] compute_hessian)."""
     a = atoms.copy(); a.set_constraint(); a.calc = EMT()
     x0 = a.get_positions().copy(); n = len(a)
     H = np.zeros((3 * n, 3 * n))
