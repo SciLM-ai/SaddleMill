@@ -173,8 +173,20 @@ inside `_setup_sella()`, so every other method runs without it installed.
 - Same delocalization (participation-ratio) and desorption `StopRun` checks as
   Dimer, same extension check (`extension_check_fmax`/`_curvature`), same
   per-attempt error isolation and `consecutive_errors` worker-health tracking.
-- **Extra output keys** vs Dimer: `n_steps`, `eigenmode_seeded` (0/1), and — when
-  `[ourSella] check_index = True` — `nneg` and `eigenvalues`.
+- **Exact starting Hessian** (`[ourSella] initial_hessian = True`, default off):
+  a Hessian stored on the input frame — `info['hessian']`, or
+  `info['orig_info']['hessian']` after `load_and_sanitize`, as written by a
+  SinglePoint pass with `store_hessian = True` — is passed to Sella as `H0`, its
+  initial Hessian model (marked initialized), instead of the uninformed default.
+  It must be the full (3N, 3N) Cartesian matrix (Sella projects constraints
+  itself); a wrong shape is an attempt error. A frame without one runs as usual
+  with a warning; continuations never use it (it describes the input geometry).
+  Sella still runs its first iterative diagonalization, which now only corrects
+  an exact model, so the saving in force calls is not automatic — measure it.
+  The consumed Hessian is dropped from the output frame (`info` and `orig_info`).
+- **Extra output keys** vs Dimer: `n_steps`, `eigenmode_seeded` (0/1),
+  `hessian_seeded` (0/1), and — when `[ourSella] check_index = True` — `nneg` and
+  `eigenvalues`.
 
 **Status vocabulary is identical to Dimer** (`converged`,
 `converged_after_extension`, `converged_to_desorption`, `not_converged`,
@@ -648,7 +660,7 @@ NEB output image metadata: `src_index`, `image_idx`, `subband_idx`, `image_type`
 
 Dimer output: `eigenmode`, `curvature`, `converged`, `src_index`, `attempt_id`, `stoprun`, `selected_index`, `reaction_type`, `status`, `task_name`, `orig_info`. Plus `nneg`/`eigenvalues` when `[ourDimer] check_index = True`.
 
-Sella output: identical to Dimer, plus `n_steps` and `eigenmode_seeded` (0/1), and `nneg`/`eigenvalues` when `[ourSella] check_index = True`. `n_force_calls` is the true evaluation count (`pes.neval`), directly comparable to Dimer's.
+Sella output: identical to Dimer, plus `n_steps`, `eigenmode_seeded` (0/1) and `hessian_seeded` (0/1), and `nneg`/`eigenvalues` when `[ourSella] check_index = True`. `n_force_calls` is the true evaluation count (`pes.neval`), directly comparable to Dimer's.
 
 DoubleMinimization output: `side` (-1/0/1), `parent_ts_index`, `converged`, `src_index`, full reaction-detection dict (`is_reaction`, `n_formed_bonds`, `n_broken_bonds`, `broken_bonds`, `formed_bonds`, plus `is_ads_reaction` / `n_ads_*` / `ads_*_bonds` for OC inputs), `status` (`converged` / `converged_desorption_skipped` / `not_converged`; TS frame always `converged`), `task_name`, optional `curvature` on the TS frame when `pre_dimer_refine=True`, `orig_info`. CSV: 2 lines per job `{job_id},{rank},{side_id},{parent_ts_idx},"{status}"`.
 

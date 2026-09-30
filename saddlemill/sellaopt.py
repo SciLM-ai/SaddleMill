@@ -122,12 +122,21 @@ def _mode_and_curvature(dyn, natoms):
 
 def _setup_sella(atoms, calc, eigenmode=None, displacement_dict=None,
                  sella_kwargs=None, dimer_control_kwargs=None,
-                 control_logfile=None, logfile=None, trajectory=None):
+                 control_logfile=None, logfile=None, trajectory=None,
+                 hessian=None):
     """Create a Sella optimizer for a saddle search. Mirrors `_setup_dimer()`.
 
     Does not run the optimization. The caller attaches callbacks and calls
     `dyn.run()`. Returns `(dyn, seeded)`; *seeded* records whether the stored
     eigenmode was installed as the initial mode guess.
+
+    *hessian*, if given, is an exact (3N, 3N) Cartesian Hessian of the start
+    geometry (e.g. a SinglePoint ``store_hessian`` result). It becomes Sella's
+    initial Hessian model (``PES(H0=...)``, marked initialized) instead of the
+    uninformed default, so the first P-RFO step already follows the true
+    curvature and Sella's first iterative diagonalization only has to correct
+    an already-exact model. Sella projects out constrained DOF itself, so the
+    unprojected Hessian is the right input.
     """
     from sella import Sella
 
@@ -141,6 +150,8 @@ def _setup_sella(atoms, calc, eigenmode=None, displacement_dict=None,
     # Cartesian, not internal coordinates: these are periodic solids and slabs,
     # and Sella's internal-coordinate machinery targets molecular systems.
     kw.setdefault("internal", False)
+    if hessian is not None:
+        kw["H0"] = np.asarray(hessian, dtype=float)
     dyn = Sella(atoms, logfile=logfile, trajectory=trajectory, **kw)
 
     seeded = _seed_eigenmode(dyn, eigenmode)
@@ -212,7 +223,8 @@ def sellaopt(i, config_dict, atoms_orig, calc, consecutive_errors=None,
             # Use continuation structure if available for this attempt. Unlike
             # the Dimer, Sella needs no symmetry-breaking kick to restart - it
             # rebuilds its own curvature model - so the geometry is reused as is.
-            if continuation_data and attempt in continuation_data:
+            continued = bool(continuation_data and attempt in continuation_data)
+            if continued:
                 atoms = continuation_data[attempt]
                 displacement_dict = None
 
@@ -241,6 +253,26 @@ def sellaopt(i, config_dict, atoms_orig, calc, consecutive_errors=None,
                 if eigenmode is not None:
                     eigenmode = np.array(eigenmode)
 
+                # Optional exact starting Hessian stored on the input frame (a
+                # SinglePoint store_hessian pass). It describes the INPUT geometry,
+                # so it is never applied to a continuation, which starts elsewhere.
+                initial_H = None
+                if our.get("initial_hessian") and not continued:
+                    initial_H = atoms.info.get('hessian')
+                    if initial_H is None:
+                        initial_H = atoms.info.get('orig_info', {}).get('hessian')
+                    if initial_H is None:
+                        print(f"Rank {rank} WARNING structure {i}, attempt {attempt}: "
+                              f"initial_hessian = True but the frame carries no stored "
+                              f"'hessian'; Sella builds its own.", flush=True)
+                    else:
+                        initial_H = np.asarray(initial_H, dtype=float)
+                        if initial_H.shape != (3 * len(atoms), 3 * len(atoms)):
+                            raise ValueError(
+                                f"stored hessian has shape {initial_H.shape}, expected "
+                                f"{(3 * len(atoms), 3 * len(atoms))} (full Cartesian, "
+                                f"as written by [ourSinglePoint] store_hessian)")
+
                 attempt_calc = resolve_vasp_calc(config_dict, calc, i, attempt, "ourSella", atoms=atoms)
                 dyn, seeded = _setup_sella(
                     atoms, attempt_calc, eigenmode=eigenmode,
@@ -249,6 +281,7 @@ def sellaopt(i, config_dict, atoms_orig, calc, consecutive_errors=None,
                     dimer_control_kwargs=config_dict.get("DimerControl"),
                     control_logfile=temp_log,
                     logfile=temp_opt_log, trajectory=temp_traj,
+                    hessian=initial_H,
                 )
 
                 # PR Check - skip early steps to let Sella's Hessian model pick
@@ -359,6 +392,14 @@ def sellaopt(i, config_dict, atoms_orig, calc, consecutive_errors=None,
                 atoms.info['n_force_calls'] = int(n_force_calls)
                 atoms.info['n_steps'] = n_steps
                 atoms.info['eigenmode_seeded'] = 1 if seeded else 0
+                atoms.info['hessian_seeded'] = 1 if initial_H is not None else 0
+                if our.get("initial_hessian"):
+                    # The stored Hessian was consumed: it describes the start
+                    # geometry, not this output, and at (3N)^2 floats it would
+                    # dominate the output file. The input file still holds it.
+                    atoms.info.pop('hessian', None)
+                    if isinstance(atoms.info.get('orig_info'), dict):
+                        atoms.info['orig_info'].pop('hessian', None)
                 atoms.info['converged'] = 1 if converged else 0
                 atoms.info['src_index'] = i
                 atoms.info['attempt_id'] = attempt

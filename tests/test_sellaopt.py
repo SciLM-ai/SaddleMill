@@ -606,3 +606,72 @@ class TestHessianStorageSwitches:
         a, _ = self._atoms()
         out = hessian_outputs(a)
         assert "hessian" not in out and self.EIGEN_KEYS <= set(out)
+
+
+# --------------------------------------------------------------------------
+# Sella started from a stored exact Hessian ([ourSella] initial_hessian)
+# --------------------------------------------------------------------------
+
+def _fd_hessian(atoms, eps=1e-3):
+    """Full (3N, 3N) central-difference Hessian with EMT, constraints ignored
+    (the same convention as [ourSinglePoint] store_hessian)."""
+    a = atoms.copy(); a.set_constraint(); a.calc = EMT()
+    x0 = a.get_positions().copy(); n = len(a)
+    H = np.zeros((3 * n, 3 * n))
+    for k in range(3 * n):
+        xp = x0.copy(); xp.flat[k] += eps; a.set_positions(xp); fp = a.get_forces().ravel()
+        xm = x0.copy(); xm.flat[k] -= eps; a.set_positions(xm); fm = a.get_forces().ravel()
+        H[:, k] = -(fp - fm) / (2 * eps)
+    return 0.5 * (H + H.T)
+
+
+class TestInitialHessian:
+    def test_default_is_off(self):
+        from saddlemill.config import ConfigManager
+        assert ConfigManager.DEFAULTS["ourSella"]["initial_hessian"] is False
+
+    def test_setup_installs_the_hessian_as_sellas_model(self):
+        from saddlemill.sellaopt import _setup_sella
+        slab = _cu_slab()
+        H = _fd_hessian(slab)
+        dyn, _ = _setup_sella(slab, EMT(), hessian=H)
+        assert np.allclose(dyn.pes.H.asarray(), H), "H0 must become Sella's Hessian model"
+
+    def _run(self, tmp_path, monkeypatch, hessian, initial_hessian, steps=5):
+        from saddlemill.sellaopt import sellaopt
+        _setup_dirs(tmp_path, monkeypatch)
+        config = _make_config(steps=steps, initial_hessian=initial_hessian)
+        slab = _cu_slab()
+        if hessian is not None:
+            slab.info["hessian"] = hessian
+        sellaopt(0, config, _prepare(slab), EMT(), consecutive_errors=[0],
+                 executorlib_worker_id=0)
+        rows = list(csv.reader((tmp_path / "Sella_status_csvs" / "status_rank_0.csv").open()))
+        traj = tmp_path / "Sella_trajes" / "collected_ts_rank_0.traj"
+        frames = list(Trajectory(str(traj))) if traj.exists() and traj.stat().st_size else []
+        return frames, rows
+
+    def test_stored_hessian_is_used_then_dropped_from_the_output(self, tmp_path, monkeypatch):
+        """The Hessian arrives under orig_info (load_and_sanitize), seeds Sella,
+        and is not copied into the output: it describes the start geometry."""
+        H = _fd_hessian(_cu_slab())
+        frames, rows = self._run(tmp_path, monkeypatch, H, True)
+        assert len(frames) == 1 and not rows[0][-1].startswith("error"), rows
+        info = frames[0].info
+        assert info["hessian_seeded"] == 1
+        assert "hessian" not in info and "hessian" not in info.get("orig_info", {})
+
+    def test_off_ignores_a_stored_hessian(self, tmp_path, monkeypatch):
+        H = _fd_hessian(_cu_slab())
+        frames, _ = self._run(tmp_path, monkeypatch, H, False)
+        assert frames[0].info["hessian_seeded"] == 0
+
+    def test_missing_hessian_runs_without_one(self, tmp_path, monkeypatch, capsys):
+        frames, rows = self._run(tmp_path, monkeypatch, None, True)
+        assert len(frames) == 1 and frames[0].info["hessian_seeded"] == 0
+        assert "carries no stored 'hessian'" in capsys.readouterr().out
+
+    def test_wrong_shape_is_an_attempt_error(self, tmp_path, monkeypatch):
+        frames, rows = self._run(tmp_path, monkeypatch, np.eye(6), True)
+        assert frames == []
+        assert rows[0][-1].startswith("error") and "stored hessian has shape" in rows[0][-1]

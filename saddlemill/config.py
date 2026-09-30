@@ -142,6 +142,12 @@ class ConfigManager:
             "index_nev": 4,
             "index_eps": 2e-3,
             "index_tol": 1e-2,
+            # Start Sella from the exact Hessian stored on the input frame
+            # (info['hessian'] or orig_info['hessian'], as written by a SinglePoint
+            # pass with store_hessian = True) instead of an uninformed model.
+            # Frames without one run as usual (with a warning). Not applied to
+            # continuations; the consumed Hessian is dropped from the output.
+            "initial_hessian": False,
             "vasp_command": None,
             "vasp_ncore": None,
         },
