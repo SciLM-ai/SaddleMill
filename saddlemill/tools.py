@@ -735,19 +735,24 @@ def _install_chunked_vmap(_O, torch, chunk):
 
     Stock compute_hessian_vmap maps over the whole eye(3N), materialising 3N
     backward graphs at once; that exceeds 40 GB above ~30 atoms. Chunking is
-    identical arithmetic with peak memory set by the chunk.
+    identical arithmetic with peak memory set by the chunk. If ``_O._sm_rows``
+    holds DOF indices, only those rows are computed and the rest stay zero
+    (`_full_analytic_hessian` uses this to skip frozen atoms).
     """
     def _chunked(forces_flat, pos, create_graph, _c=chunk):
         n = forces_flat.shape[0]
         eye = torch.eye(n, device=forces_flat.device, dtype=forces_flat.dtype)
-        out = []
-        for i in range(0, n, _c):
+        rows = getattr(_O, "_sm_rows", None)
+        rows = torch.arange(n, device=eye.device) if rows is None else rows.to(eye.device)
+        out = torch.zeros(n, n, device=eye.device, dtype=eye.dtype)
+        for i in range(0, len(rows), _c):
+            r = rows[i:i + _c]
             blk = torch.vmap(lambda v: torch.autograd.grad(
                 -1 * forces_flat, pos, grad_outputs=v,
-                retain_graph=True, create_graph=create_graph)[0])(eye[i:i + _c])
-            out.append(blk.reshape(blk.shape[0], -1).detach())
+                retain_graph=True, create_graph=create_graph)[0])(eye[r])
+            out[r] = blk.reshape(len(r), -1).detach()
             del blk
-        return torch.cat(out, 0)
+        return out
     _O.compute_hessian_vmap = _chunked
     _O._sm_chunked = chunk
 
@@ -783,8 +788,14 @@ def _fixed_indices(atoms):
 
 
 def _full_analytic_hessian(atoms, chunk=1):
-    """Exact (3N, 3N) Cartesian Hessian from a conservative MLIP, NOT projected
-    for constraints, or None if unavailable.
+    """Exact constrained Hessian from a conservative MLIP in full (3N, 3N)
+    Cartesian layout, or None if unavailable.
+
+    Rows and columns of atoms held by ASE constraints are zero, and only the
+    free-atom rows are computed (3-4x faster on an OC slab). The model itself is
+    blind to constraints: its raw frozen rows would add spurious modes (15
+    negative eigenvalues instead of 3 on a 131-atom OC slab), and zeroing only
+    the frozen-frozen block would be worse (86), so both rows and columns go.
 
     UMA-S-1.2 has ``direct_forces=False`` - its forces are a true autograd
     gradient of the energy - so ``-grad(forces)`` is the genuine energy Hessian.
@@ -810,12 +821,18 @@ def _full_analytic_hessian(atoms, chunk=1):
     # Halving costs a little speed and is far better than losing the frame.
     H = None
     n3 = 3 * len(atoms)
+    fixed = set(_fixed_indices(atoms))
+    fdof = [3 * i + k for i in sorted(fixed) for k in range(3)]
     try:
+        _O._sm_rows = (torch.as_tensor([d for d in range(n3) if d // 3 not in fixed])
+                       if fixed else None)
         for c in (chunk, max(1, chunk // 2), 1):
             if getattr(_O, "_sm_chunked", None) != c:
                 _install_chunked_vmap(_O, torch, c)
             try:
-                H = np.asarray(atoms.calc.get_property("hessian", atoms)).reshape(n3, n3)
+                H = np.array(atoms.calc.get_property("hessian", atoms), dtype=float).reshape(n3, n3)
+                H[fdof, :] = 0.0            # frozen atoms decoupled: rows and columns
+                H[:, fdof] = 0.0
                 H = 0.5 * (H + H.T)         # symmetrise away numerical asymmetry
                 break
             except torch.OutOfMemoryError:
@@ -825,6 +842,7 @@ def _full_analytic_hessian(atoms, chunk=1):
                 return None
         return H
     finally:
+        _O._sm_rows = None
         # Release the retained autograd graph and the cached hessian tensor;
         # without it a worker accumulates GPU memory across structures.
         _release(atoms, torch)
@@ -872,9 +890,9 @@ def hessian_outputs(atoms, nev_store=8, tol=1e-2, chunk=1,
 
     Two independent switches; the Hessian is computed once either way:
 
-    * ``compute_hessian`` keeps the Hessian itself - key ``hessian``: the full
-      (3N, 3N) Cartesian matrix in eV/A^2, atom order, NOT projected for
-      constraints (rows/columns of fixed atoms hold the model's raw values). It
+    * ``compute_hessian`` keeps the Hessian itself - key ``hessian``: the
+      constrained Hessian in full (3N, 3N) Cartesian layout, eV/A^2, atom order,
+      with zero rows and columns for fixed atoms. It
       is what `sellaopt` accepts as an exact starting Hessian
       (``[ourSella] initial_hessian = True``). No diagonalization is done for it.
     * ``compute_eigenmodes`` diagonalizes the constraint-projected Hessian and

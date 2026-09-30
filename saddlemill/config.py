@@ -48,9 +48,11 @@ class ConfigManager:
             # Exact analytical Hessian for every frame (FAIRChem, conservative
             # models only; forces frames_per_job=1). Two independent switches -
             # the Hessian is computed once if either is on:
-            #   compute_hessian    -> info['hessian']: the full (3N, 3N) Cartesian
-            #                         Hessian, unprojected; no diagonalization.
-            #                         What [ourSella] initial_hessian consumes.
+            #   compute_hessian    -> info['hessian']: the constrained Hessian in
+            #                         full (3N, 3N) Cartesian layout (fixed atoms'
+            #                         rows/columns zero; only free rows computed);
+            #                         no diagonalization. What [ourSella]
+            #                         initial_hessian consumes.
             #   compute_eigenmodes -> diagonalize the constraint-projected Hessian
             #                         and store hessian_eigenvalues /
             #                         hessian_eigenmodes (lowest hessian_nev_store) /

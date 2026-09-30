@@ -556,14 +556,41 @@ class TestHessianStorageSwitches:
         a.calc.H = H
         return a, H
 
-    def test_hessian_only_stores_the_full_unprojected_matrix(self):
+    def test_hessian_only_stores_the_constrained_matrix(self):
+        """Full 3N x 3N layout; fixed atoms' rows AND columns zero, free block exact."""
+        import fairchem.core.models.uma.outputs as _O
         from saddlemill.tools import hessian_outputs
         a, H = self._atoms()
         out = hessian_outputs(a, compute_hessian=True, compute_eigenmodes=False)
         assert set(out) == {"hessian", "hessian_wall_s"}, "no diagonalization output expected"
-        assert out["hessian"].shape == (18, 18), "full 3N x 3N, fixed atoms included"
-        assert np.allclose(out["hessian"], H)
+        Hs = out["hessian"]
+        assert Hs.shape == (18, 18)
+        assert np.allclose(Hs[:6], 0.0) and np.allclose(Hs[:, :6], 0.0), "atoms 0,1 fixed"
+        assert np.allclose(Hs[6:, 6:], H[6:, 6:])
         assert out["hessian_wall_s"] >= 0.0
+        assert getattr(_O, "_sm_rows", None) is None, "row selection must not leak to the next call"
+
+    def test_row_restricted_vmap_is_exact_on_the_requested_rows(self):
+        """The patched fairchem vmap computes only the rows in _O._sm_rows (the
+        free-atom speed-up) and they equal the true Hessian rows."""
+        import types
+        import torch
+        from saddlemill.tools import _install_chunked_vmap
+        O = types.SimpleNamespace()
+        _install_chunked_vmap(O, torch, 2)
+        n, rng = 4, np.random.RandomState(0)
+        A = rng.randn(3 * n, 3 * n); A = A + A.T
+        pos = torch.tensor(rng.rand(n, 3), dtype=torch.float64, requires_grad=True)
+        x = pos.reshape(-1)
+        E = 0.5 * x @ torch.tensor(A) @ x
+        forces = -torch.autograd.grad(E, pos, create_graph=True)[0]
+        rows = [3, 4, 5, 9]
+        O._sm_rows = torch.tensor(rows)
+        H = O.compute_hessian_vmap(forces.reshape(-1), pos, False).numpy()
+        assert np.allclose(H[rows], A[rows])
+        assert np.allclose(np.delete(H, rows, axis=0), 0.0), "unrequested rows stay zero"
+        O._sm_rows = None
+        assert np.allclose(O.compute_hessian_vmap(forces.reshape(-1), pos, False).numpy(), A)
 
     def test_eigenmodes_only_stores_the_projected_spectrum_not_the_matrix(self):
         from saddlemill.tools import hessian_outputs, _project_free

@@ -219,7 +219,7 @@ independent switches; the Hessian is computed once if either is on:
 
 | switch | stored in `.info` | diagonalization |
 |---|---|---|
-| `compute_hessian = True` | `hessian`: full (3N, 3N) Cartesian matrix, eV/Å², atom order, **not** projected for constraints | none |
+| `compute_hessian = True` | `hessian`: the constrained Hessian in full (3N, 3N) Cartesian layout, eV/Å², atom order — rows **and** columns of fixed atoms are zero | none |
 | `compute_eigenmodes = True` | `hessian_eigenvalues` (lowest `hessian_nev_store`, `-1` = all), `hessian_eigenmodes` ((k, N, 3), zero on fixed atoms), `hessian_index` (count < `-hessian_tol`), `hessian_nzero`, `eigenmode` (lowest mode, (N, 3)), `curvature` | of the constraint-projected Hessian (free DOF only) |
 | both | all of the above | yes |
 
@@ -233,16 +233,21 @@ commit `fe37822`, `compute_hessian = True` produced the eigen summary (what is n
 `compute_eigenmodes`); it now stores the matrix only — old configs that relied on
 it for `eigenmode` seeding must switch to `compute_eigenmodes = True`.
 
-- **Cost.** fairchem builds the Hessian as 3N vector-Jacobian products through
-  the force graph and batches them with `torch.vmap`; `hessian_chunk` sets how
-  many rows are vectorized at once (`tools._install_chunked_vmap`). The
-  arithmetic is ~3N backward passes either way; larger chunks run them in
+- **Cost.** fairchem builds the Hessian as one vector-Jacobian product per row
+  through the force graph and batches them with `torch.vmap`; `hessian_chunk`
+  sets how many rows are vectorized at once (`tools._install_chunked_vmap`).
+  Only the rows of free atoms are computed (`_O._sm_rows`), so a slab costs
+  ~3·nfree backward passes, not 3N (131-atom OC slab: 105 of 393 rows, 94 s vs
+  259 s on 16 CPU cores, identical to 3e-6 eV/Å²). Larger chunks run rows in
   parallel (faster) at a memory cost that grows with the chunk. The default of 1
   is sequential and never OOMs; on OOM a larger chunk is retried at half size,
   then 1.
-- **Constraints.** The model is blind to ASE constraints, so the eigen summary is
-  taken on the free-DOF block (`tools._project_free`); the stored `hessian` is the
-  raw full matrix, which is what Sella wants (it projects constraints itself).
+- **Constraints.** The model is blind to ASE constraints: its raw frozen-atom rows
+  add spurious modes (15 negative eigenvalues instead of the true 3 on that slab),
+  and zeroing only the frozen-frozen block is worse (86). So the Hessian returned
+  and stored has fixed atoms' rows and columns zeroed — the constrained Hessian,
+  consistent with Sella's own constraint projection; the eigen summary is taken
+  on its free-DOF block (`tools._project_free`).
 - **Size.** `hessian` is (3N)² float64 — 1 MB at N = 120, 30 MB at N = 650 — so
   only request it when a consumer needs the matrix.
 - The hessian inference setting (`predict_untrained_hessian`) is enabled only for

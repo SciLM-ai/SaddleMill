@@ -135,8 +135,8 @@ def _setup_sella(atoms, calc, eigenmode=None, displacement_dict=None,
     initial Hessian model (``PES(H0=...)``, marked initialized) instead of the
     uninformed default, so the first P-RFO step already follows the true
     curvature and Sella's first iterative diagonalization only has to correct
-    an already-exact model. Sella projects out constrained DOF itself, so the
-    unprojected Hessian is the right input.
+    an already-exact model. Sella projects out constrained DOF itself, which is
+    consistent with the stored constrained Hessian (fixed rows/columns zero).
     """
     from sella import Sella
 
