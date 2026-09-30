@@ -217,7 +217,7 @@ def fairchem_calc():
 def converged_ts_atoms():
     """Pre-generated converged TS from fixtures/converged_ts.traj.
 
-    Contains eigenmode, converged=1, src_index=0, status='converged' in
+    Contains approx_eigenmode, converged=1, src_index=0, status='converged' in
     .info, plus SinglePointCalculator with energy/forces. Generated once
     via Dimer with FAIRChem on oc_adsorbate_slab.
     """

@@ -298,7 +298,7 @@ SaddleMill automatically handles resume if a job times out or is interrupted:
 
 ### Dimer: `initial_guess` Reaction Type
 
-The `initial_guess` reaction type is for running the dimer method on a **pre-prepared TS guess** from an external source (another code, a database, or a different SaddleMill method like NEB). It starts the dimer from the input geometry as-is with no displacement and no supercell expansion (even if `supercell = True`). If the input structure has an eigenmode in `atoms.info['eigenmode']`, it is used to seed the dimer instead of a random guess.
+The `initial_guess` reaction type is for running the dimer method on a **pre-prepared TS guess** from an external source (another code, a database, or a different SaddleMill method like NEB). It starts the dimer from the input geometry as-is with no displacement and no supercell expansion (even if `supercell = True`). If the input structure carries a mode, it seeds the dimer instead of a random guess: the exact Hessian mode `atoms.info['eigenmodes'][0]` (from a SinglePoint `compute_eigenmodes` pass) is used first, else a saddle search's `atoms.info['approx_eigenmode']`.
 
 ```ini
 [ourDimer]
@@ -340,17 +340,17 @@ The `oc22` built-in reproduces the OC22 dataset's level of theory exactly (arXiv
 extra_input_files = modecar       # built-in | 'module:func' | 'file.py:func' | space-separated list
 ```
 
-The built-in `modecar` builds the file from `atoms.info['eigenmode']` (the same eigenmode NEB/Dimer/DoubleMinimization already stamp on their output frames), reordered to POSCAR order. A custom writer is any `writer(calc, atoms, directory) -> None` (it receives the calculator, so it can use `calc.sort`).
+The built-in `modecar` builds the file from the frame's lowest mode, reordered to POSCAR order: `atoms.info['eigenmodes'][0]` (exact, from a SinglePoint `compute_eigenmodes` pass) if present, else `atoms.info['approx_eigenmode']` (the mode NEB/Dimer/Sella stamp on their output frames). A DoubleMinimization TS frame carries the mode it displaced along, as `eigenmodes` when that mode was an exact input mode left unrefined and as `approx_eigenmode` otherwise. A custom writer is any `writer(calc, atoms, directory) -> None` (it receives the calculator, so it can use `calc.sort`).
 
-Symmetrically, **`extra_outputs`** parses files back *out* of the VASP directory after the run and merges the result into the output frame's `.info`. A parser is any `parser(calc, atoms, directory) -> dict`; the built-in `vtst_dimer` returns `eigenmode` (from `NEWMODECAR`, mapped back to atoms order via `calc.resort`) and `curvature` (from `DIMCAR`).
+Symmetrically, **`extra_outputs`** parses files back *out* of the VASP directory after the run and merges the result into the output frame's `.info`. A parser is any `parser(calc, atoms, directory) -> dict`; the built-in `vtst_dimer` returns `approx_eigenmode` (from `NEWMODECAR`, mapped back to atoms order via `calc.resort`) and `approx_curvature` (from `DIMCAR`).
 
 Together these enable a **VASP-internal VTST dimer driven by SaddleMill as a pure launcher**:
 
 ```ini
 [ourVasp]
 input_generator   = omat24_static   # base INCAR recipe
-extra_input_files = modecar         # write MODECAR from each frame's eigenmode
-extra_outputs     = vtst_dimer      # read NEWMODECAR/DIMCAR -> eigenmode/curvature onto output
+extra_input_files = modecar         # write MODECAR from each frame's lowest mode
+extra_outputs     = vtst_dimer      # read NEWMODECAR/DIMCAR -> approx_eigenmode/approx_curvature onto output
 
 [Vasp]                              # VTST dimer driver tags (plain pass-through)
 ichain = 2
@@ -363,7 +363,16 @@ nsw = 300
 ediffg = -0.03
 ```
 
-with `method = SinglePoint`, `Calculator = Vasp`. SaddleMill runs one VASP call per structure, VASP runs the whole dimer internally, and the converged saddle (geometry + E/F) **plus** the refined `eigenmode`/`curvature` are written to the output traj. Use plain `Vasp` (not `VaspInteractive`, which forces `ibrion = -1`). The input frames must carry `atoms.info['eigenmode']` (e.g. NEB-CI / Dimer / DoubleMinimization outputs).
+with `method = SinglePoint`, `Calculator = Vasp`. SaddleMill runs one VASP call per structure, VASP runs the whole dimer internally, and the converged saddle (geometry + E/F) **plus** the refined `approx_eigenmode`/`approx_curvature` are written to the output traj. Use plain `Vasp` (not `VaspInteractive`, which forces `ibrion = -1`). The input frames must carry `atoms.info['approx_eigenmode']` (e.g. NEB-CI / Dimer / Sella outputs) or `atoms.info['eigenmodes']` (a SinglePoint `compute_eigenmodes` pass), and a DoubleMinimization TS frame carries one of the two (see `modecar` above).
+
+## Known limitations
+
+These edge cases fall outside the usual Dimer → DoubleMinimization workflow and are not fixed yet.
+
+- **Fresh Dimer/Sella attempts reuse a stored mode.** When an input frame already carries a mode (`eigenmodes` or `approx_eigenmode`, as on a Dimer, Sella, NEB-CI or SinglePoint `compute_eigenmodes` output), every fresh displacement attempt is seeded with that mode, although it was computed for the input geometry and the attempt starts from a displaced one. On bulk inputs the supercell or vacancy step changes the atom count, so the attempt fails with a shape error such as `operands could not be broadcast together with shapes (31,3) (4,3)`. `initial_guess` attempts and continuations are meant to reuse the mode and work as intended.
+- **SinglePoint `.traj` output hides the input's mode.** Mode readers check the top level of `.info` and one `orig_info` level down, and a SinglePoint output frame stores only its own results at the top level. A DoubleMinimization run on the SinglePoint output of a Dimer run therefore stops with "Input structure missing 'eigenmodes' or 'approx_eigenmode' in info." unless that SinglePoint pass wrote its own mode (`compute_eigenmodes = True`). Dimer and Sella outputs already carry energies and forces, so DoubleMinimization can read them directly.
+- **`orig_info` history grows without limit.** Each job wraps the whole previous `.info` in a new `orig_info` level and none is ever removed, so a Dimer → DoubleMinimization cycle adds 2 levels. The usual 2 to 4 levels are harmless, but a long chain such as an AKMC loop would grow the stored frames at every step, and ASE's traj/aselmdb writers fail with a `RecursionError` between 950 and 1000 levels (about 475 Dimer → DoubleMinimization cycles, with Python's default recursion limit of 1000). Trimming old levels would also have to keep the provenance levels that `scripts/` join on.
+- **Dimer runs are not bit-reproducible.** ASE's `MinModeAtoms` seeds its own random generator from the clock when no `random_seed` is given, and SaddleMill passes none, so two Dimer runs on the same input can differ even with fixed `random` and NumPy seeds.
 
 ## Testing
 

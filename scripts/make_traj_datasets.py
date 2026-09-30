@@ -204,7 +204,9 @@ def _scan_dm(path):
         if k not in hits:
             hits[k] = [int(at.info.get("src_index")), rank, None]
         if _WANT_EIG and at.info.get("side") == 0 and hits[k][2] is None:
-            eig = at.info.get("eigenmode")
+            eig = at.info.get("approx_eigenmode")
+            if eig is None:
+                eig = at.info.get("eigenmode")   # runs before the approx_ rename
             if eig is not None:
                 hits[k][2] = np.asarray(eig, np.float32)
     return {k: tuple(v) for k, v in hits.items()}

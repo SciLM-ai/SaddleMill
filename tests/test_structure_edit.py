@@ -342,15 +342,28 @@ class TestInitialGuess:
         )
 
     def test_preserves_eigenmode_from_orig_info(self):
-        """If atoms.info['orig_info']['eigenmode'] exists, it should be copied to output."""
+        """If atoms.info['orig_info']['approx_eigenmode'] exists, it should be copied to output."""
         _seed()
         atoms = bulk("Cu", "fcc", a=3.6, cubic=True) * (2, 2, 2)
         eigenmode = np.random.randn(len(atoms), 3)
-        atoms.info["orig_info"] = {"eigenmode": eigenmode}
+        atoms.info["orig_info"] = {"approx_eigenmode": eigenmode}
         images, dds, idxs = get_initial_guess_attempts(atoms)
-        assert "eigenmode" in images[0].info
-        np.testing.assert_array_almost_equal(images[0].info["eigenmode"], eigenmode)
+        assert "approx_eigenmode" in images[0].info
+        np.testing.assert_array_almost_equal(images[0].info["approx_eigenmode"], eigenmode)
         assert images[0].info["reaction_type"] == "initial_guess"
+
+    def test_exact_eigenmodes_stay_in_orig_info(self):
+        """An exact Hessian mode is read from orig_info by the searches, so it is
+        not promoted to a top-level approx_eigenmode."""
+        from saddlemill.tools import lowest_mode
+        _seed()
+        atoms = bulk("Cu", "fcc", a=3.6, cubic=True) * (2, 2, 2)
+        modes = np.random.randn(2, len(atoms), 3)
+        atoms.info["orig_info"] = {"eigenmodes": modes, "eigenvalues": [-0.3, 0.2]}
+        images, dds, idxs = get_initial_guess_attempts(atoms)
+        assert "approx_eigenmode" not in images[0].info
+        mode, _, exact = lowest_mode(images[0].info["orig_info"])
+        assert exact and np.allclose(mode, modes[0])
 
 
 # =========================================================================

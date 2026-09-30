@@ -82,7 +82,7 @@ class TestLoadAndSanitize:
     def test_preserves_original_info_keys(self, tmp_path):
         """Original info keys are preserved inside orig_info, not lost."""
         atoms = bulk("Cu", "fcc", a=3.6)
-        atoms.info = {"eigenmode": [[1, 0, 0]], "converged": True, "src_index": 7}
+        atoms.info = {"approx_eigenmode": [[1, 0, 0]], "converged": True, "src_index": 7}
         traj_path = tmp_path / "info.traj"
         self._write_traj(traj_path, [atoms])
 
@@ -90,7 +90,7 @@ class TestLoadAndSanitize:
             result = load_and_sanitize(traj, 0, 1)
 
         orig = result.info["orig_info"]
-        assert orig["eigenmode"] == [[1, 0, 0]]
+        assert orig["approx_eigenmode"] == [[1, 0, 0]]
         assert orig["converged"] is True
         assert orig["src_index"] == 7
 

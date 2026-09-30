@@ -9,7 +9,7 @@ from ase.calculators.singlepoint import SinglePointCalculator
 from saddlemill.tools import (check_reaction, check_adsorbate_reaction, backup_flux_logs,
                               get_task_name, resolve_vasp_calc, remove_vasp_heavies,
                               finalize_if_vasp_interactive, archive_and_clear_temp_files,
-                              vasp_final_scf_converged,
+                              vasp_final_scf_converged, lowest_mode,
                               DOUBLEMIN_PARTIALS_DIR)
 from saddlemill.config import append_status_row
 from saddlemill.dimeropt import _refine_eigenmode
@@ -140,16 +140,15 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
         orig = atoms.info.get('orig_info', {})
         parent_source_idx = orig.get('src_index')
         try:
-            if 'eigenmode' not in orig:
-                raise Exception("Input structure missing 'eigenmode' in info.")
+            # Exact Hessian mode (eigenmodes[0]) if present, else the saddle
+            # search's approx_eigenmode.
+            refined_eigenmode, curvature, exact_mode = lowest_mode(orig)
+            if refined_eigenmode is None:
+                raise Exception("Input structure missing 'eigenmodes' or 'approx_eigenmode' in info.")
             if 'src_index' not in orig:
                 raise Exception("Input structure missing 'src_index' in info.")
 
-            # Identify IDs
-            refined_eigenmode = orig['eigenmode']
-
             # --- OPTIONAL: Refine eigenmode via dimer rotation ---
-            curvature = orig.get('curvature')
             if config_dict['ourDoubleMinimization']['pre_dimer_refine']:
                 dimer_log = f'dimer_refine_{i}.log'
                 temp_files.append(dimer_log)
@@ -158,6 +157,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                     dimer_control_kwargs=config_dict.get("DimerControl", {}),
                     control_logfile=dimer_log,
                 )
+                exact_mode = False
 
             continue_from_result = config_dict["Main"]["continue_from_result"]
 
@@ -299,9 +299,17 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                 obj.info.update(reaction_info)
             ts_atoms.info['side'] = 0
             ts_atoms.info['src_index'] = i
-            ts_atoms.info['eigenmode'] = refined_eigenmode
-            if curvature is not None:
-                ts_atoms.info['curvature'] = curvature
+            # Stamp the mode used under its own label, one level up where the
+            # next reader looks. The TS geometry is unchanged, so an exact,
+            # unrefined mode stays exact.
+            if exact_mode:
+                ts_atoms.info['eigenmodes'] = refined_eigenmode[None]  # (1, N, 3)
+                if curvature is not None:
+                    ts_atoms.info['eigenvalues'] = [curvature]
+            else:
+                ts_atoms.info['approx_eigenmode'] = refined_eigenmode
+                if curvature is not None:
+                    ts_atoms.info['approx_curvature'] = curvature
 
             # --- WRITE FRAMES (Min1, TS, Min2) ---
             side_statuses = {}
@@ -476,7 +484,7 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
                 sp_status = "converged" if ok else "not_converged"
                 record_converged = True
             # Stamp anything an [ourVasp] extra_outputs parser captured from the
-            # VASP dir (e.g. VTST dimer eigenmode/curvature) onto the output frame.
+            # VASP dir (e.g. VTST dimer approx_eigenmode/approx_curvature) onto the output frame.
             a.info.update(getattr(vasp_calc, "sm_extra_outputs", {}) or {})
             ef_pairs = [(energy_v, forces_v)]
         elif len(frames) > 1:
@@ -515,7 +523,6 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
                 hess_extra = hessian_outputs(
                     a,
                     nev_store=our_sp.get("hessian_nev_store", 8),
-                    tol=our_sp.get("hessian_tol", 1e-2),
                     chunk=our_sp.get("hessian_chunk", 1),
                     compute_hessian=want_hessian,
                     compute_eigenmodes=want_eigen,
@@ -537,13 +544,18 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
             # the explicit data= blob — so we pass the source row_data through
             # verbatim (no bookkeeping stamps; they'd be dropped anyway). The one
             # exception is opted-in [ourVasp] extra_outputs (e.g. a VTST dimer's
-            # eigenmode/curvature): those are *new* results the user asked for, so
+            # approx_eigenmode/approx_curvature): those are *new* results the user asked for, so
             # merge them into the row's info so lmdb output carries the same extras
             # as traj output. sm_extra is empty for FAIRChem (vasp_calc is None) ->
             # byte-equivalent passthrough, preserving the build_lmdb_parallel parity.
             sm_extra = getattr(vasp_calc, "sm_extra_outputs", {}) or {}
+            # lmdb info is one flat level, so a new VTST approx_eigenmode would sit
+            # next to an exact spectrum from the geometry before VASP moved it, and
+            # lowest_mode prefers the exact one. Drop that stale spectrum.
+            stale = (("eigenmodes", "eigenvalues", "hessian")
+                     if "approx_eigenmode" in sm_extra else ())
             if hess_extra:
-                # eigenmode is (N,3); ase.db data= takes nested lists fine.
+                # eigenmodes is (k,N,3); ase.db data= takes nested lists fine.
                 sm_extra = {**sm_extra,
                             **{k: (v.tolist() if hasattr(v, "tolist") else v)
                                for k, v in hess_extra.items()}}
@@ -558,7 +570,9 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
                     a.calc = SinglePointCalculator(a, energy=e, forces=f_arr)
                     row_data = dict(extra.get('row_data') or {})
                     if sm_extra:
-                        row_data['info'] = {**(row_data.get('info') or {}), **sm_extra}
+                        row_info = {k: v for k, v in (row_data.get('info') or {}).items()
+                                    if k not in stale}
+                        row_data['info'] = {**row_info, **sm_extra}
                     db.write(a, **(extra.get('kvp') or {}), data=row_data)
         else:
             out_path = f"{method_name}_trajes/collected_sp_rank_{rank}.traj"

@@ -880,7 +880,7 @@ def _analytic_hessian(atoms, chunk=1):
     return _project_free(H, atoms)
 
 
-def hessian_outputs(atoms, nev_store=8, tol=1e-2, chunk=1,
+def hessian_outputs(atoms, nev_store=8, chunk=1,
                     compute_hessian=False, compute_eigenmodes=True):
     """Exact Hessian results for a structure, as a dict to stamp onto output.
 
@@ -896,24 +896,18 @@ def hessian_outputs(atoms, nev_store=8, tol=1e-2, chunk=1,
       is what `sellaopt` accepts as an exact starting Hessian
       (``[ourSella] initial_hessian = True``). No diagonalization is done for it.
     * ``compute_eigenmodes`` diagonalizes the constraint-projected Hessian and
-      keeps the spectrum instead of the matrix: ``hessian_eigenvalues`` (lowest
-      ``nev_store``; all when ``nev_store`` < 0), ``hessian_eigenmodes`` (the
-      matching eigenvectors, (k, N, 3) in full Cartesian, zero on fixed atoms),
-      ``hessian_index`` (count below ``-tol``), ``hessian_nzero`` (count with
-      |lambda| < 1e-3), ``eigenmode`` (lowest mode, (N, 3)) and ``curvature``
-      (lowest eigenvalue). ``eigenmode`` is the key both ``dimeropt`` and
-      ``sellaopt`` read to seed their search, so a SinglePoint+Hessian pass
-      feeds the next reconvergence the EXACT lowest mode with no extra plumbing.
-
-    ``hessian_wall_s`` (seconds spent computing the Hessian, diagonalization
-    excluded) is always included, so a Hessian's cost can be accounted for.
+      keeps the spectrum instead of the matrix: ``eigenvalues`` (lowest
+      ``nev_store``, ascending; all when ``nev_store`` < 0) and ``eigenmodes``
+      (the matching eigenvectors, (k, N, 3) in full Cartesian, zero on fixed
+      atoms). ``dimeropt``, ``sellaopt``, ``doublegeomopt`` and the VTST
+      ``modecar`` writer seed from ``eigenmodes[0]`` (see :func:`lowest_mode`),
+      so a SinglePoint+Hessian pass feeds the next reconvergence the EXACT
+      lowest mode with no extra plumbing.
     """
-    import time
-    t0 = time.time()
     H = _full_analytic_hessian(atoms, chunk=chunk)
     if H is None:
         return {}
-    out = {"hessian_wall_s": float(time.time() - t0)}
+    out = {}
     if compute_hessian:
         out["hessian"] = H
     if not compute_eigenmodes:
@@ -929,20 +923,33 @@ def hessian_outputs(atoms, nev_store=8, tol=1e-2, chunk=1,
     modes = np.zeros((k, len(atoms), 3))
     for j in range(k):
         modes[j, free] = evecs[:, j].reshape(len(free), 3)
-    mode = modes[0].copy() if k else np.zeros((len(atoms), 3))
-    n = np.linalg.norm(mode)
-    if n > 1e-12:
-        mode /= n
 
     out.update({
-        "hessian_index": int((evals < -tol).sum()),
-        "hessian_nzero": int((np.abs(evals) < 1e-3).sum()),
-        "hessian_eigenvalues": [float(x) for x in evals[:k]],
-        "hessian_eigenmodes": modes,
-        "eigenmode": mode,
-        "curvature": float(evals[0]),
+        "eigenvalues": [float(x) for x in evals[:k]],
+        "eigenmodes": modes,
     })
     return out
+
+
+def lowest_mode(info):
+    """Lowest mode stored in ONE ``.info`` level, as ``(mode, curvature, exact)``.
+
+    The exact Hessian mode (``eigenmodes[0]`` / ``eigenvalues[0]``, written by a
+    SinglePoint ``compute_eigenmodes`` pass) wins over a saddle search's
+    ``approx_eigenmode`` / ``approx_curvature``. ``exact`` says which one was
+    found. Returns ``(None, None, False)`` when the level carries neither.
+    Callers pick the level (top level, then ``orig_info``) per the .info rule.
+    """
+    info = info or {}
+    modes = info.get("eigenmodes")
+    if modes is not None and len(modes):
+        evals = info.get("eigenvalues")
+        curv = float(evals[0]) if evals is not None and len(evals) else None
+        return np.array(modes[0]), curv, True
+    mode = info.get("approx_eigenmode")
+    if mode is not None:
+        return np.array(mode), info.get("approx_curvature"), False
+    return None, None, False
 
 
 def hessian_request(sp):

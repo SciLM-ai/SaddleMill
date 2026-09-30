@@ -41,7 +41,8 @@ from saddlemill.config import append_status_row
 from saddlemill.dimertools.structure_edit import get_attempts
 from saddlemill.tools import (backup_flux_logs, get_task_name, resolve_vasp_calc,
                               remove_vasp_heavies, finalize_if_vasp_interactive,
-                              archive_and_clear_temp_files, hessian_index)
+                              archive_and_clear_temp_files, hessian_index,
+                              lowest_mode)
 
 
 class StopRun(Exception):
@@ -247,11 +248,9 @@ def sellaopt(i, config_dict, atoms_orig, calc, consecutive_errors=None,
                 # Use existing eigenmode if available (top level from
                 # get_attempts/initial_guess, or orig_info from continuation),
                 # otherwise let Sella derive its own from the gradient.
-                eigenmode = atoms.info.get('eigenmode')
+                eigenmode = lowest_mode(atoms.info)[0]
                 if eigenmode is None:
-                    eigenmode = atoms.info.get('orig_info', {}).get('eigenmode')
-                if eigenmode is not None:
-                    eigenmode = np.array(eigenmode)
+                    eigenmode = lowest_mode(atoms.info.get('orig_info', {}))[0]
 
                 # Optional exact starting Hessian stored on the input frame (a
                 # SinglePoint compute_hessian pass). It describes the INPUT geometry,
@@ -386,9 +385,9 @@ def sellaopt(i, config_dict, atoms_orig, calc, consecutive_errors=None,
                 if attempt_vasp_dir is not None:
                     remove_vasp_heavies(attempt_vasp_dir)
 
-                atoms.info['eigenmode'] = eigenmode_out
+                atoms.info['approx_eigenmode'] = eigenmode_out
                 if curvature is not None:
-                    atoms.info['curvature'] = float(curvature)
+                    atoms.info['approx_curvature'] = float(curvature)
                 atoms.info['n_force_calls'] = int(n_force_calls)
                 atoms.info['n_steps'] = n_steps
                 atoms.info['eigenmode_seeded'] = 1 if seeded else 0

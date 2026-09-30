@@ -156,7 +156,7 @@ allow_shared_calculator = True
             if img.info["image_type"] == "climbing":
                 has_climbing = True
                 # CI images must have eigenmode, barrier, dE
-                assert "eigenmode" in img.info, "CI image missing eigenmode"
+                assert "approx_eigenmode" in img.info, "CI image missing eigenmode"
                 assert "barrier" in img.info, "CI image missing barrier"
                 assert "dE" in img.info, "CI image missing dE"
 
@@ -206,13 +206,14 @@ dimer_separation = 0.01
         from saddlemill.__main__ import main
         main()
 
-        # Verify CSV format: job_id,rank,attempt_id,selected_index,status
+        # Verify CSV format: job_id,rank,attempt_id,selected_index,n_force_calls,status
         csv_files = glob.glob("Dimer_status_csvs/*.csv")
         assert len(csv_files) >= 1
         with open(csv_files[0], 'r') as f:
             for parts in csv.reader(f):
-                assert len(parts) == 5, f"Dimer CSV should have 5 columns, got: {parts}"
-                status = parts[4]
+                assert len(parts) == 6, f"Dimer CSV should have 6 columns, got: {parts}"
+                assert int(parts[4]) >= 0, f"n_force_calls should be an int, got: {parts[4]}"
+                status = parts[5]
                 valid_statuses = {
                     "converged", "converged_after_extension",
                     "converged_to_desorption",
@@ -227,8 +228,8 @@ dimer_separation = 0.01
         assert len(traj_files) >= 1
         result = read(traj_files[0])
         required_keys = [
-            "src_index", "attempt_id", "reaction_type", "eigenmode",
-            "converged", "stoprun", "selected_index", "curvature",
+            "src_index", "attempt_id", "reaction_type", "approx_eigenmode",
+            "converged", "stoprun", "selected_index", "approx_curvature",
         ]
         for key in required_keys:
             assert key in result.info, f"Dimer output missing '{key}'"
@@ -237,7 +238,7 @@ dimer_separation = 0.01
         assert result.info["stoprun"] in (0, 1)
         # eigenmode should be an array with shape (natoms, 3)
         import numpy as np
-        eigenmode = np.array(result.info["eigenmode"])
+        eigenmode = np.array(result.info["approx_eigenmode"])
         assert eigenmode.shape == (len(result), 3)
 
     def test_neb_resume_continuation(self, tmp_path, monkeypatch):
@@ -428,7 +429,7 @@ dimer_separation = 0.01
         resumed_result = read(traj_files[0])
         assert "src_index" in resumed_result.info
         assert "attempt_id" in resumed_result.info
-        assert "eigenmode" in resumed_result.info
+        assert "approx_eigenmode" in resumed_result.info
 
     def test_minimization_resume(self, tmp_path, monkeypatch):
         """Run Minimization with few steps, then resume with run_jobs=not_converged."""

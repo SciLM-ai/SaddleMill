@@ -54,16 +54,12 @@ class ConfigManager:
             #                         no diagonalization. What [ourSella]
             #                         initial_hessian consumes.
             #   compute_eigenmodes -> diagonalize the constraint-projected Hessian
-            #                         and store hessian_eigenvalues /
-            #                         hessian_eigenmodes (lowest hessian_nev_store) /
-            #                         hessian_index / hessian_nzero / eigenmode /
-            #                         curvature, not the matrix. eigenmode seeds the
-            #                         next Dimer/Sella run.
-            # Either also stamps hessian_wall_s (time spent on the Hessian).
+            #                         and store eigenvalues / eigenmodes (lowest
+            #                         hessian_nev_store), not the matrix.
+            #                         eigenmodes[0] seeds the next Dimer/Sella run.
             "compute_hessian": False,
             "compute_eigenmodes": False,
             "hessian_nev_store": 8,   # eigenpairs to keep with compute_eigenmodes; -1 = all
-            "hessian_tol": 1e-2,      # eigenvalue < -tol counts toward the index
             "hessian_chunk": 1,       # vmap rows per batch; raise for speed if memory allows
             "frames_per_job": 1,  # 1 (default) | 3. With 3, each executorlib job processes a triplet (e.g. DM min1/TS/min2) in a single batched FAIRChem forward pass. VASP requires 1.
             "vasp_command": None,

@@ -269,6 +269,6 @@ class TestNebopt:
             for idx in range(len(traj)):
                 frame = traj[idx]
                 if frame.info["image_type"] == "climbing":
-                    assert "eigenmode" in frame.info
+                    assert "approx_eigenmode" in frame.info
                     assert "barrier" in frame.info
                     assert "dE" in frame.info

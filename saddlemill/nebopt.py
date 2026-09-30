@@ -618,7 +618,7 @@ def nebopt(i, config_dict, images, calc, Optimizer, consecutive_errors=None, exe
                     img.info['interpolation_method'] = interp_method_out
 
                     if j == seg_ci:
-                        img.info['eigenmode'] = tangent
+                        img.info['approx_eigenmode'] = tangent
                         img.info['barrier'] = seg_barrier
                         img.info['dE'] = seg_dE
 

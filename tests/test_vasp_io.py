@@ -348,12 +348,12 @@ class TestLoadExtraInputWriter:
 
 
 class TestWriteModecar:
-    def _atoms(self, eigenmode, info_key="eigenmode"):
+    def _atoms(self, eigenmode, info_key="approx_eigenmode"):
         a = Atoms("H3", positions=[[0, 0, 0], [1, 0, 0], [2, 0, 0]])
         if info_key == "orig":
-            a.info["orig_info"] = {"eigenmode": eigenmode}
+            a.info["orig_info"] = {"approx_eigenmode": eigenmode}
         else:
-            a.info["eigenmode"] = eigenmode
+            a.info["approx_eigenmode"] = eigenmode
         return a
 
     def test_ordering_uses_calc_sort(self, tmp_path):
@@ -372,9 +372,20 @@ class TestWriteModecar:
         write_modecar(_FakeCalc(directory=str(tmp_path)), atoms, str(tmp_path))
         assert (tmp_path / "MODECAR").exists()
 
+    def test_exact_eigenmodes_win_over_approx(self, tmp_path):
+        """A SinglePoint compute_eigenmodes pass (eigenmodes[0]) seeds MODECAR
+        ahead of a search's approx_eigenmode on the same level."""
+        atoms = self._atoms([[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
+        exact = np.zeros((2, 3, 3)); exact[0, 1, 2] = 1.0
+        atoms.info["eigenmodes"] = exact
+        write_modecar(_FakeCalc(directory=str(tmp_path)), atoms, str(tmp_path))
+        assert np.allclose(np.loadtxt(tmp_path / "MODECAR"), exact[0])
+
     def test_missing_eigenmode_warns_and_skips(self, tmp_path):
         atoms = Atoms("H3", positions=[[0, 0, 0], [1, 0, 0], [2, 0, 0]])
-        with pytest.warns(UserWarning, match="no 'eigenmode'"):
+        # the pre-rename key is not read (clean break)
+        atoms.info["eigenmode"] = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]
+        with pytest.warns(UserWarning, match="no 'eigenmodes' or 'approx_eigenmode'"):
             write_modecar(_FakeCalc(directory=str(tmp_path)), atoms, str(tmp_path))
         assert not (tmp_path / "MODECAR").exists()
 
@@ -384,7 +395,7 @@ class TestExtraInputFilesWiring:
         wrapped = _with_extra_io(_FakeCalc, [write_modecar], [])
         inst = wrapped(directory=str(tmp_path))
         atoms = Atoms("H2", positions=[[0, 0, 0], [1, 0, 0]])
-        atoms.info["eigenmode"] = [[1., 0., 0.], [0., 1., 0.]]
+        atoms.info["approx_eigenmode"] = [[1., 0., 0.], [0., 1., 0.]]
         inst.write_input(atoms)
         assert inst.wrote_input is True             # super().write_input ran
         assert (tmp_path / "MODECAR").exists()      # writer ran after it
@@ -410,7 +421,7 @@ class TestExtraInputFilesWiring:
         wrapped = resolve_vasp_calc_class(cfg, _FakeCalc)
         inst = wrapped(directory=str(tmp_path))
         atoms = Atoms("H2", positions=[[0, 0, 0], [1, 0, 0]])
-        atoms.info["eigenmode"] = [[1., 0., 0.], [0., 1., 0.]]
+        atoms.info["approx_eigenmode"] = [[1., 0., 0.], [0., 1., 0.]]
         inst.write_input(atoms)
         assert (tmp_path / "MODECAR").exists() and (tmp_path / "ICONST").exists()
 
@@ -426,9 +437,9 @@ class TestReadVtstDimer:
         calc = _FakeCalc(directory=str(tmp_path), resort=[2, 0, 1])  # POSCAR -> atoms
         info = read_vtst_dimer(calc, atoms, str(tmp_path))
 
-        assert info["curvature"] == -0.45                       # last DIMCAR row, col 4
+        assert info["approx_curvature"] == -0.45                # last DIMCAR row, col 4
         mode_poscar = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], float)
-        assert np.allclose(info["eigenmode"], mode_poscar[[2, 0, 1]])  # resorted
+        assert np.allclose(info["approx_eigenmode"], mode_poscar[[2, 0, 1]])  # resorted
 
     def test_converged_dimcar_dashes_reads_row_above(self, tmp_path):
         # On convergence VTST's Dimer_Fin writes a final row with '---' in the
@@ -441,7 +452,7 @@ class TestReadVtstDimer:
             "   13   0.07027   ---      -160.69053   ---        ---\n")
         atoms = Atoms("H")
         info = read_vtst_dimer(_FakeCalc(directory=str(tmp_path)), atoms, str(tmp_path))
-        assert info["curvature"] == -3.17780                    # row above the '---'
+        assert info["approx_curvature"] == -3.17780             # row above the '---'
 
     def test_overflow_curvature_row_skipped(self, tmp_path):
         # A Fortran '*****' overflow in the Curvature column (numeric Force) must be
@@ -452,7 +463,7 @@ class TestReadVtstDimer:
             "    2   106.0  61896  -9347   *********  60.6\n")
         atoms = Atoms("H")
         info = read_vtst_dimer(_FakeCalc(directory=str(tmp_path)), atoms, str(tmp_path))
-        assert info["curvature"] == -0.30
+        assert info["approx_curvature"] == -0.30
 
     def test_missing_files_returns_empty(self, tmp_path):
         atoms = Atoms("H")
@@ -476,7 +487,7 @@ class TestExtraOutputsWiring:
         inst.atoms = Atoms("H2", positions=[[0, 0, 0], [1, 0, 0]])
         inst.read_results()
         assert inst.read_called is True                # super().read_results() ran
-        assert "eigenmode" in inst.sm_extra_outputs    # parser ran after it
+        assert "approx_eigenmode" in inst.sm_extra_outputs    # parser ran after it
 
 
 class TestExtraOutputsReachSinglePointLMDB:
@@ -484,7 +495,7 @@ class TestExtraOutputsReachSinglePointLMDB:
     SinglePoint *lmdb* output, exactly as they do in traj output. Drives the real
     ``geomopt.singlepoint()`` lmdb branch with a stand-in VASP calc (no DFT)."""
 
-    def _run_sp_lmdb(self, tmp_path, monkeypatch, sm_extra):
+    def _run_sp_lmdb(self, tmp_path, monkeypatch, sm_extra, source_info=None):
         pytest.importorskip("fairchem.core.datasets")  # registers the aselmdb backend
         from ase.db import connect
         import saddlemill.geomopt as geomopt
@@ -508,9 +519,10 @@ class TestExtraOutputsReachSinglePointLMDB:
 
         a = Atoms("H2", positions=[[0, 0, 0], [0, 0, 0.74]], cell=[10, 10, 10], pbc=True)
         # Source row carries a STALE eigenmode guess (zeros) + unrelated info.
-        source_info = {"orig_info": {"foo": 1},
-                       "eigenmode": [[0., 0., 0.], [0., 0., 0.]],
-                       "src_tag": "INPUT"}
+        if source_info is None:
+            source_info = {"orig_info": {"foo": 1},
+                           "approx_eigenmode": [[0., 0., 0.], [0., 0., 0.]],
+                           "src_tag": "INPUT"}
         extras = [{"kvp": {"sid": 5},
                    "row_data": {"info": dict(source_info), "traj_path": "/in.traj"}}]
 
@@ -525,15 +537,16 @@ class TestExtraOutputsReachSinglePointLMDB:
         return row, energy, forces, source_info
 
     def test_vasp_extras_merged_into_lmdb_info(self, tmp_path, monkeypatch):
-        sm_extra = {"eigenmode": np.array([[0., 0., 1.], [1., 0., 0.]]), "curvature": -0.77}
+        sm_extra = {"approx_eigenmode": np.array([[0., 0., 1.], [1., 0., 0.]]),
+                    "approx_curvature": -0.77}
         row, energy, forces, source_info = self._run_sp_lmdb(tmp_path, monkeypatch, sm_extra)
 
         assert row.energy == energy                       # E/F populated via SPC
         assert np.allclose(row.forces, forces)
         info = row.data["info"]
         # the dimer's fresh eigenmode overwrites the stale input guess
-        assert np.allclose(np.array(info["eigenmode"]), sm_extra["eigenmode"])
-        assert info["curvature"] == -0.77
+        assert np.allclose(np.array(info["approx_eigenmode"]), sm_extra["approx_eigenmode"])
+        assert info["approx_curvature"] == -0.77
         # source info preserved verbatim alongside the new keys
         assert info["src_tag"] == "INPUT"
         assert info["orig_info"] == {"foo": 1}
@@ -547,9 +560,39 @@ class TestExtraOutputsReachSinglePointLMDB:
         assert row.energy == energy
         info = row.data["info"]
         assert set(info.keys()) == set(source_info.keys())   # nothing added
-        assert "curvature" not in info
+        assert "approx_curvature" not in info
         assert info["src_tag"] == "INPUT"
-        assert np.allclose(np.array(info["eigenmode"]), 0.0)  # stale guess untouched
+        assert np.allclose(np.array(info["approx_eigenmode"]), 0.0)  # stale guess untouched
+
+    # An exact spectrum from a Hessian pass at the pre-VASP geometry.
+    _EXACT = {"eigenvalues": [-0.2, 0.5],
+              "eigenmodes": [[[1., 0., 0.], [0., 0., 0.]], [[0., 1., 0.], [0., 0., 0.]]],
+              "hessian": np.eye(6).tolist(),
+              "src_tag": "INPUT"}
+
+    def test_vtst_mode_drops_stale_exact_spectrum(self, tmp_path, monkeypatch):
+        # lmdb info is flat: without the drop, lowest_mode would seed the next
+        # pass from the old exact eigenmodes[0] instead of the new VTST mode.
+        from saddlemill.tools import lowest_mode
+        sm_extra = {"approx_eigenmode": np.array([[0., 0., 1.], [1., 0., 0.]]),
+                    "approx_curvature": -0.77}
+        row, _, _, _ = self._run_sp_lmdb(tmp_path, monkeypatch, sm_extra,
+                                         source_info=dict(self._EXACT))
+        info = row.data["info"]
+        assert not {"eigenmodes", "eigenvalues", "hessian"} & set(info)
+        assert info["src_tag"] == "INPUT"
+        mode, curv, exact = lowest_mode(info)
+        assert not exact and curv == -0.77
+        assert np.allclose(mode, sm_extra["approx_eigenmode"])
+
+    def test_no_new_mode_keeps_exact_spectrum(self, tmp_path, monkeypatch):
+        # Only a new approx_eigenmode replaces the spectrum; other extras do not.
+        row, _, _, _ = self._run_sp_lmdb(tmp_path, monkeypatch, {"other": 1},
+                                         source_info=dict(self._EXACT))
+        info = row.data["info"]
+        assert info["eigenvalues"] == [-0.2, 0.5]
+        assert np.allclose(np.array(info["eigenmodes"]), self._EXACT["eigenmodes"])
+        assert np.allclose(np.array(info["hessian"]), np.eye(6))
 
 
 class TestSinglePointVaspDebugZip:

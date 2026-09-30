@@ -921,17 +921,20 @@ def get_initial_guess_attempts(atoms):
     refinement (rotation + translation) is needed — no random perturbation.
     Always produces exactly 1 attempt.
 
-    If the input atoms carry an eigenmode (in atoms.info['eigenmode'] or
-    atoms.info['orig_info']['eigenmode']), it is preserved in the output so
-    that dimeropt can seed the dimer with it instead of a random guess.
+    If the input atoms carry a saddle search's mode
+    (atoms.info['orig_info']['approx_eigenmode']), it is preserved in the output
+    so that dimeropt can seed the dimer with it instead of a random guess. An
+    exact Hessian mode (orig_info['eigenmodes']) needs no copy: dimeropt and
+    sellaopt read it from orig_info, and promoting it would carry the input's
+    spectrum onto the output frame.
     """
     atoms_new = atoms.copy()
     atoms_new.info['reaction_type'] = 'initial_guess'
 
-    # Propagate eigenmode from orig_info if present
+    # Propagate the saddle search's mode from orig_info if present
     orig = atoms.info.get('orig_info', {})
-    if 'eigenmode' in orig:
-        atoms_new.info['eigenmode'] = np.array(orig['eigenmode'])
+    if 'approx_eigenmode' in orig:
+        atoms_new.info['approx_eigenmode'] = np.array(orig['approx_eigenmode'])
 
     disp_vector = np.random.randn(len(atoms_new), 3) * 1e-10
     return [atoms_new], [{"displacement_vector": disp_vector, "method": "vector"}], [-1]

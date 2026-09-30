@@ -12,7 +12,7 @@ concatenated. Every image must carry::
 Exactly one image per band must also carry::
 
     atoms.info['barrier']    # climbing-image barrier height
-    atoms.info['eigenmode']  # CI eigenmode
+    atoms.info['approx_eigenmode']  # CI eigenmode ('eigenmode' in pre-rename runs)
 
 ``task_name`` is assumed to be set upstream; this script does not touch it.
 
@@ -123,10 +123,10 @@ def extract_triplet(chunk):
             f"got {len(ci_candidates)} "
             f"(src_index={chunk[0].info.get('src_index')})")
     saddle = ci_candidates[0]
-    if 'eigenmode' not in saddle.info:
+    if 'approx_eigenmode' not in saddle.info and 'eigenmode' not in saddle.info:
         raise RuntimeError(
             f"saddle (src_index={saddle.info.get('src_index')}) "
-            f"has 'barrier' but no 'eigenmode'")
+            f"has 'barrier' but no 'approx_eigenmode' (or legacy 'eigenmode')")
     return reactant, saddle, product
 
 

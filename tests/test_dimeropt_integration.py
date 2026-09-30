@@ -92,7 +92,7 @@ class TestDimeropt:
             assert frame.info["src_index"] == 0
             assert "attempt_id" in frame.info
             assert "reaction_type" in frame.info
-            assert "eigenmode" in frame.info
+            assert "approx_eigenmode" in frame.info
             assert "converged" in frame.info
             assert frame.info["reaction_type"] == "adsorbate_atom"
 
@@ -171,7 +171,7 @@ class TestDimeropt:
             frame = traj[0]
             assert frame.info["src_index"] == 0
             assert frame.info["reaction_type"] == "vacancy"
-            assert "eigenmode" in frame.info
+            assert "approx_eigenmode" in frame.info
 
     # ----- Test: bulk ring reaction type -----
 
