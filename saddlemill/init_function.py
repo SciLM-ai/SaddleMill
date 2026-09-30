@@ -44,13 +44,15 @@ def init_function(executorlib_worker_id=None):
         calc = load_calculator(config_dict)
         if config_dict["Main"]["Calculator"] not in ("Vasp", "VaspInteractive"):  # Then initialize, store on device memory and share the calculator object between structures
             calc_kwargs = dict(config_dict[config_dict["Main"]["Calculator"]])
-            # SinglePoint + compute_hessian needs the model to expose a hessian
+            # SinglePoint + store_hessian/store_eigenmodes needs the model to expose a hessian
             # output, which is an InferenceSettings flag rather than a plain
             # kwarg. Only ever set for SinglePoint: enabling it makes EVERY force
             # call compute a full Hessian, which would slow a Dimer/Sella search
             # by ~100x for no benefit.
+            _sp = config_dict.get("ourSinglePoint", {})
             if (config_dict["Main"]["method"] == "SinglePoint"
-                    and config_dict.get("ourSinglePoint", {}).get("compute_hessian")):
+                    and (_sp.get("store_hessian") or _sp.get("store_eigenmodes")
+                         or _sp.get("compute_hessian"))):
                 from fairchem.core.units.mlip_unit.api.inference import InferenceSettings
                 task = calc_kwargs.get("task_name")
                 calc_kwargs["inference_settings"] = InferenceSettings(

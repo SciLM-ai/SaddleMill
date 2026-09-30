@@ -766,8 +766,25 @@ def _release(atoms, torch):
         pass
 
 
-def _analytic_hessian(atoms, chunk=1):
-    """Exact Hessian from a conservative MLIP, or None if unavailable.
+def _fixed_indices(atoms):
+    """Indices of atoms held by ASE constraints (FixAtoms and anything exposing
+    ``index``/``get_indices()``), as a sorted list."""
+    fixed = set()
+    for c in getattr(atoms, "constraints", []) or []:
+        idx = getattr(c, "index", None)
+        if idx is None and hasattr(c, "get_indices"):
+            try:
+                idx = c.get_indices()
+            except Exception:
+                idx = None
+        if idx is not None:
+            fixed.update(int(i) for i in np.atleast_1d(idx))
+    return sorted(fixed)
+
+
+def _full_analytic_hessian(atoms, chunk=1):
+    """Exact (3N, 3N) Cartesian Hessian from a conservative MLIP, NOT projected
+    for constraints, or None if unavailable.
 
     UMA-S-1.2 has ``direct_forces=False`` - its forces are a true autograd
     gradient of the energy - so ``-grad(forces)`` is the genuine energy Hessian.
@@ -777,9 +794,9 @@ def _analytic_hessian(atoms, chunk=1):
     rows is identical arithmetic with peak memory set by the chunk rather than
     the system size, and covers 100+ atoms in ~10-30 GB.
 
-    Returns the (3N, 3N) Hessian, or None when the calculator cannot produce one
-    (direct-force model, hessian output not enabled, or out of memory) so the
-    caller can fall back to finite differences.
+    Returns None when the calculator cannot produce a Hessian (direct-force
+    model, hessian output not enabled, or out of memory) so the caller can fall
+    back to finite differences.
     """
     try:
         import torch
@@ -787,50 +804,25 @@ def _analytic_hessian(atoms, chunk=1):
     except Exception:
         return None
 
-
     # Retry with progressively smaller chunks on OOM. A worker handles many
     # structures in sequence and GPU memory accumulates despite the cleanup
     # below, so a chunk that fits on the first structure can fail on the tenth.
     # Halving costs a little speed and is far better than losing the frame.
     H = None
     n3 = 3 * len(atoms)
-    for c in (chunk, max(1, chunk // 2), 1):
-        if getattr(_O, "_sm_chunked", None) != c:
-            _install_chunked_vmap(_O, torch, c)
-        try:
-            H = np.asarray(atoms.calc.get_property("hessian", atoms)).reshape(n3, n3)
-            H = 0.5 * (H + H.T)         # symmetrise away numerical asymmetry
-            break
-        except torch.OutOfMemoryError:
-            _release(atoms, torch)
-            continue
-        except Exception:
-            _release(atoms, torch)
-            return None
     try:
-        if H is None:
-            return None
-        # The model computes the Hessian on raw positions and is BLIND to ASE
-        # constraints - unlike atoms.get_forces(), which zeroes constrained
-        # forces. Left unprojected, a slab's frozen substrate contributes its own
-        # spurious modes: on OC20/OC22 that inflates index >= 2 from ~10% to
-        # 60-75% and leaves 3 acoustic modes where FixAtoms should give 0.
-        # This MUST run before the return - an earlier refactor left it stranded
-        # after one, silently disabling it.
-        fixed = set()
-        for c in getattr(atoms, "constraints", []) or []:
-            idx = getattr(c, "index", None)
-            if idx is None and hasattr(c, "get_indices"):
-                try:
-                    idx = c.get_indices()
-                except Exception:
-                    idx = None
-            if idx is not None:
-                fixed.update(int(i) for i in np.atleast_1d(idx))
-        if fixed:
-            free = [i for i in range(len(atoms)) if i not in fixed]
-            dof = np.array([3 * i + k for i in free for k in range(3)], dtype=int)
-            H = H[np.ix_(dof, dof)]
+        for c in (chunk, max(1, chunk // 2), 1):
+            if getattr(_O, "_sm_chunked", None) != c:
+                _install_chunked_vmap(_O, torch, c)
+            try:
+                H = np.asarray(atoms.calc.get_property("hessian", atoms)).reshape(n3, n3)
+                H = 0.5 * (H + H.T)         # symmetrise away numerical asymmetry
+                break
+            except torch.OutOfMemoryError:
+                _release(atoms, torch)
+                continue
+            except Exception:
+                return None
         return H
     finally:
         # Release the retained autograd graph and the cached hessian tensor;
@@ -838,53 +830,111 @@ def _analytic_hessian(atoms, chunk=1):
         _release(atoms, torch)
 
 
-def hessian_outputs(atoms, nev_store=8, tol=1e-2, chunk=1):
-    """Exact Hessian summary for a structure, as a dict to stamp onto output.
+def _project_free(H, atoms):
+    """Restrict a full (3N, 3N) Hessian to the unconstrained DOF.
+
+    The model computes the Hessian on raw positions and is BLIND to ASE
+    constraints - unlike atoms.get_forces(), which zeroes constrained forces.
+    Left unprojected, a slab's frozen substrate contributes its own spurious
+    modes: on OC20/OC22 that inflates index >= 2 from ~10% to 60-75% and leaves
+    3 acoustic modes where FixAtoms should give 0.
+    """
+    fixed = set(_fixed_indices(atoms))
+    if not fixed:
+        return H
+    free = [i for i in range(len(atoms)) if i not in fixed]
+    dof = np.array([3 * i + k for i in free for k in range(3)], dtype=int)
+    return H[np.ix_(dof, dof)]
+
+
+def _analytic_hessian(atoms, chunk=1):
+    """Exact Hessian restricted to the free DOF (see `_project_free`), or None.
+
+    Shape (3*nfree, 3*nfree): the matrix whose spectrum decides the saddle
+    index. `_full_analytic_hessian` gives the unprojected one.
+    """
+    H = _full_analytic_hessian(atoms, chunk=chunk)
+    if H is None:
+        return None
+    # The projection MUST happen on every path that returns a Hessian for index
+    # or eigen purposes - an earlier refactor once left it stranded after a
+    # return, silently disabling it.
+    return _project_free(H, atoms)
+
+
+def hessian_outputs(atoms, nev_store=8, tol=1e-2, chunk=1,
+                    store_hessian=False, store_eigenmodes=True):
+    """Exact Hessian results for a structure, as a dict to stamp onto output.
 
     Returns ``{}`` when no analytical Hessian is available (direct-force model,
     hessian output not enabled on the calculator, or out of memory) so the caller
     degrades to a plain single point rather than failing the job.
 
-    The ``eigenmode`` key is the point of the whole thing: it is the EXACT lowest
-    eigenvector, and both ``dimeropt`` and ``sellaopt`` already read
-    ``atoms.info['eigenmode']`` to seed their search. So a SinglePoint+Hessian
-    pass feeds the next reconvergence for free, with no extra plumbing - and an
-    exact mode is a strictly better seed than the stored approximate one.
+    Two independent switches; the Hessian is computed once either way:
 
-    Keys: hessian_index (count below -tol), hessian_nzero, hessian_eigenvalues
-    (lowest nev_store), eigenmode (N,3), curvature (lowest eigenvalue).
+    * ``store_hessian`` keeps the Hessian itself - key ``hessian``: the full
+      (3N, 3N) Cartesian matrix in eV/A^2, atom order, NOT projected for
+      constraints (rows/columns of fixed atoms hold the model's raw values). It
+      is what `sellaopt` accepts as an exact starting Hessian
+      (``[ourSella] initial_hessian = True``). No diagonalization is done for it.
+    * ``store_eigenmodes`` diagonalizes the constraint-projected Hessian and
+      keeps the spectrum instead of the matrix: ``hessian_eigenvalues`` (lowest
+      ``nev_store``; all when ``nev_store`` < 0), ``hessian_eigenmodes`` (the
+      matching eigenvectors, (k, N, 3) in full Cartesian, zero on fixed atoms),
+      ``hessian_index`` (count below ``-tol``), ``hessian_nzero`` (count with
+      |lambda| < 1e-3), ``eigenmode`` (lowest mode, (N, 3)) and ``curvature``
+      (lowest eigenvalue). ``eigenmode`` is the key both ``dimeropt`` and
+      ``sellaopt`` read to seed their search, so a SinglePoint+Hessian pass
+      feeds the next reconvergence the EXACT lowest mode with no extra plumbing.
+
+    ``hessian_wall_s`` (seconds spent computing the Hessian, diagonalization
+    excluded) is always included, so a Hessian's cost can be accounted for.
     """
-    H = _analytic_hessian(atoms, chunk=chunk)
+    import time
+    t0 = time.time()
+    H = _full_analytic_hessian(atoms, chunk=chunk)
     if H is None:
         return {}
-    evals, evecs = np.linalg.eigh(H)
+    out = {"hessian_wall_s": float(time.time() - t0)}
+    if store_hessian:
+        out["hessian"] = H
+    if not store_eigenmodes:
+        return out
 
-    # Map the lowest eigenvector back to full (N, 3) Cartesian. The Hessian is
+    evals, evecs = np.linalg.eigh(_project_free(H, atoms))
+    k = len(evals) if (nev_store is None or nev_store < 0) else min(int(nev_store), len(evals))
+
+    # Map eigenvectors back to full (N, 3) Cartesian. The projected Hessian is
     # restricted to free DOF, so constrained atoms take zero displacement.
-    fixed = set()
-    for c in getattr(atoms, "constraints", []) or []:
-        idx = getattr(c, "index", None)
-        if idx is None and hasattr(c, "get_indices"):
-            try: idx = c.get_indices()
-            except Exception: idx = None
-        if idx is not None:
-            fixed.update(int(i) for i in np.atleast_1d(idx))
+    fixed = set(_fixed_indices(atoms))
     free = [i for i in range(len(atoms)) if i not in fixed]
-    mode = np.zeros((len(atoms), 3))
-    v = evecs[:, 0]
-    for k, i in enumerate(free):
-        mode[i] = v[3 * k:3 * k + 3]
+    modes = np.zeros((k, len(atoms), 3))
+    for j in range(k):
+        modes[j, free] = evecs[:, j].reshape(len(free), 3)
+    mode = modes[0].copy() if k else np.zeros((len(atoms), 3))
     n = np.linalg.norm(mode)
     if n > 1e-12:
         mode /= n
 
-    return {
+    out.update({
         "hessian_index": int((evals < -tol).sum()),
         "hessian_nzero": int((np.abs(evals) < 1e-3).sum()),
-        "hessian_eigenvalues": [float(x) for x in evals[:nev_store]],
+        "hessian_eigenvalues": [float(x) for x in evals[:k]],
+        "hessian_eigenmodes": modes,
         "eigenmode": mode,
         "curvature": float(evals[0]),
-    }
+    })
+    return out
+
+
+def hessian_request(sp):
+    """``(store_hessian, store_eigenmodes)`` requested by an ``[ourSinglePoint]``
+    section. The retired ``compute_hessian = True`` means ``store_eigenmodes``
+    (what it always produced); ConfigManager renames it on read, and this also
+    covers config dicts built in code."""
+    sp = sp or {}
+    return (bool(sp.get("store_hessian", False)),
+            bool(sp.get("store_eigenmodes", False) or sp.get("compute_hessian", False)))
 
 
 def hessian_index(atoms, nev=4, eps=2e-3, tol=1e-2, maxiter=300, analytic=True):

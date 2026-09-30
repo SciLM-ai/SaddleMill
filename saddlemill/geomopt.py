@@ -503,7 +503,9 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
         else:
             a = frames[0]
             a.calc = calc
-            if our_sp.get("compute_hessian"):
+            from saddlemill.tools import hessian_request
+            want_hessian, want_eigen = hessian_request(our_sp)
+            if want_hessian or want_eigen:
                 from saddlemill.tools import hessian_outputs
                 # Hessian FIRST. The model computes energy, forces and hessian in
                 # one calculate(), so E/F below come from that same result. Doing
@@ -515,12 +517,15 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
                     nev_store=our_sp.get("hessian_nev_store", 8),
                     tol=our_sp.get("hessian_tol", 1e-2),
                     chunk=our_sp.get("hessian_chunk", 1),
+                    store_hessian=want_hessian,
+                    store_eigenmodes=want_eigen,
                 )
                 if not hess_extra:
                     # No analytical Hessian available (non-conservative model, or
                     # OOM). Say so rather than silently emitting a plain SP.
-                    print(f"Rank {rank} WARNING structure {i}: compute_hessian "
-                          f"requested but no analytical Hessian available.", flush=True)
+                    print(f"Rank {rank} WARNING structure {i}: store_hessian/"
+                          f"store_eigenmodes requested but no analytical Hessian "
+                          f"available.", flush=True)
             ef_pairs = [(a.get_potential_energy(), a.get_forces())]
 
         if input_format == "lmdb":

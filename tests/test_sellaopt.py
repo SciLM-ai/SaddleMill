@@ -401,27 +401,57 @@ class TestSinglePointHessianConfig:
     def test_defaults_exist(self):
         from saddlemill.config import ConfigManager
         sp = ConfigManager.DEFAULTS["ourSinglePoint"]
-        for k in ("compute_hessian", "hessian_nev_store", "hessian_tol", "hessian_chunk"):
+        for k in ("store_hessian", "store_eigenmodes", "hessian_nev_store",
+                  "hessian_tol", "hessian_chunk"):
             assert k in sp, f"[ourSinglePoint] missing {k}"
-        assert sp["compute_hessian"] is False, "must be off by default"
+        assert sp["store_hessian"] is False and sp["store_eigenmodes"] is False, \
+            "both must be off by default"
+        assert "compute_hessian" not in sp, "retired key must not be a default"
 
-    def test_requires_frames_per_job_1(self):
+    def test_compute_hessian_is_renamed_to_store_eigenmodes(self, tmp_path):
+        """Old configs keep working: compute_hessian = True always produced the
+        eigen summary, which is exactly store_eigenmodes."""
+        import textwrap
+        from saddlemill.config import ConfigManager
+        ini = tmp_path / "config.ini"
+        ini.write_text(textwrap.dedent("""\
+            [Main]
+            method = SinglePoint
+            [ourSinglePoint]
+            compute_hessian = True
+        """))
+        sp = ConfigManager(str(ini))["ourSinglePoint"]
+        assert sp["store_eigenmodes"] is True
+        assert sp["store_hessian"] is False
+        assert "compute_hessian" not in sp
+
+    def test_hessian_request_reads_both_keys_and_the_retired_one(self):
+        from saddlemill.tools import hessian_request
+        assert hessian_request({}) == (False, False)
+        assert hessian_request({"store_hessian": True}) == (True, False)
+        assert hessian_request({"store_eigenmodes": True}) == (False, True)
+        assert hessian_request({"store_hessian": True, "store_eigenmodes": True}) == (True, True)
+        assert hessian_request({"compute_hessian": True}) == (False, True)
+
+    @pytest.mark.parametrize("key", ["store_hessian", "store_eigenmodes", "compute_hessian"])
+    def test_requires_frames_per_job_1(self, key):
         """fairchem computes a Hessian for one system at a time."""
         from saddlemill.config import load_method
         c = make_config_dict(method="SinglePoint")
         c["Main"]["Calculator"] = "FAIRChemCalculator"
-        c["ourSinglePoint"]["compute_hessian"] = True
+        c["ourSinglePoint"][key] = True
         c["ourSinglePoint"]["frames_per_job"] = 3
         with pytest.raises(NotImplementedError, match="frames_per_job=1"):
             load_method(c)
         c["ourSinglePoint"]["frames_per_job"] = 1
         assert load_method(c).__name__ == "singlepoint"
 
-    def test_requires_fairchem(self):
+    @pytest.mark.parametrize("key", ["store_hessian", "store_eigenmodes"])
+    def test_requires_fairchem(self, key):
         from saddlemill.config import load_method
         c = make_config_dict(method="SinglePoint")
         c["Main"]["Calculator"] = "Vasp"
-        c["ourSinglePoint"]["compute_hessian"] = True
+        c["ourSinglePoint"][key] = True
         c["ourSinglePoint"]["vasp_command"] = "srun vasp_std"
         with pytest.raises(NotImplementedError, match="FAIRChemCalculator"):
             load_method(c)
@@ -507,3 +537,72 @@ class TestConstraintProjection:
         assert mode.shape == (6, 3)
         assert np.allclose(mode[[0, 1]], 0.0), "fixed atoms must not move"
         assert np.isclose(np.linalg.norm(mode), 1.0)
+
+
+class TestHessianStorageSwitches:
+    """store_hessian keeps the matrix, store_eigenmodes keeps the spectrum; the
+    Hessian is computed once either way. Fed a known Hessian so it runs on CPU."""
+
+    EIGEN_KEYS = {"hessian_index", "hessian_nzero", "hessian_eigenvalues",
+                  "hessian_eigenmodes", "eigenmode", "curvature"}
+
+    def _atoms(self, n=6, fixed=(0, 1)):
+        from ase import Atoms
+        a = Atoms("H" * n, positions=np.random.RandomState(0).rand(n, 3) * 5)
+        if fixed:
+            a.set_constraint(FixAtoms(indices=list(fixed)))
+        # a symmetric Hessian with negative, zero-ish and positive eigenvalues
+        rng = np.random.RandomState(2)
+        q, _ = np.linalg.qr(rng.randn(3 * n, 3 * n))
+        H = q @ np.diag(np.linspace(-0.5, 2.0, 3 * n)) @ q.T
+        a.calc = TestConstraintProjection._FakeCalc(n)
+        a.calc.H = H
+        return a, H
+
+    def test_hessian_only_stores_the_full_unprojected_matrix(self):
+        from saddlemill.tools import hessian_outputs
+        a, H = self._atoms()
+        out = hessian_outputs(a, store_hessian=True, store_eigenmodes=False)
+        assert set(out) == {"hessian", "hessian_wall_s"}, "no diagonalization output expected"
+        assert out["hessian"].shape == (18, 18), "full 3N x 3N, fixed atoms included"
+        assert np.allclose(out["hessian"], H)
+        assert out["hessian_wall_s"] >= 0.0
+
+    def test_eigenmodes_only_stores_the_projected_spectrum_not_the_matrix(self):
+        from saddlemill.tools import hessian_outputs, _project_free
+        a, H = self._atoms()
+        out = hessian_outputs(a, nev_store=4, store_hessian=False, store_eigenmodes=True)
+        assert "hessian" not in out
+        assert self.EIGEN_KEYS <= set(out)
+        ref = np.linalg.eigvalsh(_project_free(H, a))
+        assert np.allclose(out["hessian_eigenvalues"], ref[:4])
+        modes = np.asarray(out["hessian_eigenmodes"])
+        assert modes.shape == (4, 6, 3)
+        assert np.allclose(modes[:, [0, 1]], 0.0), "fixed atoms must not move in any mode"
+        Hp = _project_free(H, a)
+        for j in range(4):  # each stored mode is an eigenvector of the projected Hessian
+            v = modes[j][2:].ravel()
+            assert np.allclose(Hp @ v, ref[j] * v, atol=1e-8)
+        assert np.allclose(out["eigenmode"], modes[0] / np.linalg.norm(modes[0]))
+        assert out["curvature"] == pytest.approx(ref[0])
+        assert out["hessian_index"] == int((ref < -1e-2).sum())
+
+    def test_both_switches_store_both(self):
+        from saddlemill.tools import hessian_outputs
+        a, H = self._atoms()
+        out = hessian_outputs(a, store_hessian=True, store_eigenmodes=True)
+        assert "hessian" in out and self.EIGEN_KEYS <= set(out)
+
+    def test_negative_nev_store_keeps_every_eigenpair(self):
+        from saddlemill.tools import hessian_outputs
+        a, _ = self._atoms()
+        out = hessian_outputs(a, nev_store=-1, store_eigenmodes=True)
+        assert len(out["hessian_eigenvalues"]) == 12, "3 * 4 free atoms"
+        assert np.asarray(out["hessian_eigenmodes"]).shape == (12, 6, 3)
+
+    def test_default_call_is_the_old_eigen_summary(self):
+        """hessian_outputs(atoms) keeps its pre-switch behaviour for existing callers."""
+        from saddlemill.tools import hessian_outputs
+        a, _ = self._atoms()
+        out = hessian_outputs(a)
+        assert "hessian" not in out and self.EIGEN_KEYS <= set(out)

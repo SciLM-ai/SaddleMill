@@ -199,6 +199,42 @@ homework. Both methods route through this one function, gated by
 indices are directly comparable. A genuine first-order saddle has exactly one
 eigenvalue below `-tol`; `n_negative >= 2` is a higher-order saddle.
 
+### Exact Hessian from a SinglePoint pass — `[ourSinglePoint] store_hessian` / `store_eigenmodes`
+
+`method = SinglePoint` can compute the exact analytical Hessian of every frame
+(FAIRChem, conservative models only; requires `frames_per_job = 1`). Two
+independent switches; the Hessian is computed once if either is on:
+
+| switch | stored in `.info` | diagonalization |
+|---|---|---|
+| `store_hessian = True` | `hessian`: full (3N, 3N) Cartesian matrix, eV/Å², atom order, **not** projected for constraints | none |
+| `store_eigenmodes = True` | `hessian_eigenvalues` (lowest `hessian_nev_store`, `-1` = all), `hessian_eigenmodes` ((k, N, 3), zero on fixed atoms), `hessian_index` (count < `-hessian_tol`), `hessian_nzero`, `eigenmode` (lowest mode, (N, 3)), `curvature` | of the constraint-projected Hessian (free DOF only) |
+| both | all of the above | yes |
+
+Either switch also stamps `hessian_wall_s` (seconds spent on the Hessian, the
+diagonalization excluded) so its cost can be accounted for. `eigenmode` is the
+key `dimeropt`/`sellaopt` read to seed a search, and `hessian` is what
+`[ourSella] initial_hessian` consumes, so a SinglePoint pass feeds the next
+saddle search exactly. The retired `compute_hessian = True` is renamed to
+`store_eigenmodes` on read (it always produced that summary);
+`tools.hessian_request()` gives `(store_hessian, store_eigenmodes)` for a section.
+
+- **Cost.** fairchem builds the Hessian as 3N vector-Jacobian products through
+  the force graph and batches them with `torch.vmap`; `hessian_chunk` sets how
+  many rows are vectorized at once (`tools._install_chunked_vmap`). The
+  arithmetic is ~3N backward passes either way; larger chunks run them in
+  parallel (faster) at a memory cost that grows with the chunk. The default of 1
+  is sequential and never OOMs; on OOM a larger chunk is retried at half size,
+  then 1.
+- **Constraints.** The model is blind to ASE constraints, so the eigen summary is
+  taken on the free-DOF block (`tools._project_free`); the stored `hessian` is the
+  raw full matrix, which is what Sella wants (it projects constraints itself).
+- **Size.** `hessian` is (3N)² float64 — 1 MB at N = 120, 30 MB at N = 650 — so
+  only request it when a consumer needs the matrix.
+- The hessian inference setting (`predict_untrained_hessian`) is enabled only for
+  SinglePoint with one of these switches on: with it on, every force call builds
+  a Hessian, which would slow a Dimer/Sella search ~100×.
+
 ### `dimertools/structure_edit.py` - Reaction Types for Dimer
 Reaction types configured via `reaction_types` (space-separated list). Bulk and OC dispatched via `_BULK_REACTION_TYPE_DISPATCH` / `_OC_REACTION_TYPE_DISPATCH`.
 
