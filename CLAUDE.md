@@ -184,6 +184,12 @@ inside `_setup_sella()`, so every other method runs without it installed.
   Sella still runs its first iterative diagonalization, which now only corrects
   an exact model, so the saving in force calls is not automatic — measure it.
   The consumed Hessian is dropped from the output frame (`info` and `orig_info`).
+  With no frozen atoms (bulk) the three rigid translations are moved to the top
+  of `H0`'s spectrum first (`_lift_translations`): an exact Hessian puts them at
+  ~0, some slightly negative, and although Sella projects them out of its steps
+  its full-space model keeps them, so `_mode_and_curvature` reported a
+  translation as the lowest mode and the delocalization guard stopped the run
+  (153/200 seeded bulk runs from noisy starts in the FM1 dry run, 2026-09-30).
 - **Extra output keys** vs Dimer: `n_steps`, `eigenmode_seeded` (0/1),
   `hessian_seeded` (0/1), and — when `[ourSella] check_index = True` — `nneg` and
   `eigenvalues`.
@@ -745,7 +751,7 @@ tests/
 ├── test_tools.py                # load_and_sanitize, check_reaction, extraction, get_task_name, passes_input_filter, VASP SCF check (57, CPU)
 ├── test_structure_edit.py       # Bulk & OC reaction types, supercell (43, CPU)
 ├── test_kappa_changes.py        # Kappa engine, force-call counting, per-type attempt counts on EMT (16, CPU)
-├── test_sellaopt.py             # Sella config/seeding/accounting/e2e on EMT, Hessian outputs, lowest_mode, initial_hessian (54, CPU)
+├── test_sellaopt.py             # Sella config/seeding/accounting/e2e on EMT, Hessian outputs, lowest_mode, initial_hessian (57, CPU)
 ├── test_vasp_io.py              # input generators, MODECAR writer, VTST parser, SinglePoint VASP outputs/status (53, CPU; OMat24/OC20 cases skip without their packages)
 ├── test_sp_resume.py            # SinglePoint VASP resume: banking wall-killed VTST state, seeding POSCAR/MODECAR (23, CPU)
 ├── test_sp_resume_modes.py      # wall-kill states the SinglePoint resume gate must handle (11, CPU)

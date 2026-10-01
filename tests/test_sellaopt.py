@@ -8,7 +8,7 @@ import csv
 
 import numpy as np
 import pytest
-from ase.build import fcc100, add_adsorbate
+from ase.build import bulk, fcc100, add_adsorbate
 from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
 from ase.io import Trajectory
@@ -26,6 +26,14 @@ def _cu_slab():
     fixed = [i for i in range(len(slab)) if zs[i] < zs.min() + 1.0]
     slab.set_constraint(FixAtoms(indices=fixed))
     return slab
+
+
+def _cu_bulk():
+    """32-atom Cu bulk cell near the EMT minimum, rattled; no frozen atoms, so the
+    rigid translations are a ~zero-curvature null space of its exact Hessian."""
+    cell = bulk("Cu", "fcc", a=3.6, cubic=True).repeat(2)
+    cell.rattle(0.05, seed=0)
+    return cell
 
 
 def _prepare(atoms):
@@ -690,6 +698,40 @@ class TestInitialHessian:
         H = _fd_hessian(slab)
         dyn, _ = _setup_sella(slab, EMT(), hessian=H)
         assert np.allclose(dyn.pes.H.asarray(), H), "H0 must become Sella's Hessian model"
+
+    def test_lift_moves_bulk_translations_to_the_top_and_keeps_the_rest(self):
+        from saddlemill.sellaopt import _lift_translations
+        cell = _cu_bulk(); n = len(cell)
+        H = _fd_hessian(cell)
+        T = np.zeros((3 * n, 3))
+        for k in range(3):
+            T[k::3, k] = 1.0 / np.sqrt(n)
+        w, V = np.linalg.eigh(H)
+        assert np.linalg.norm(T.T @ V[:, 0]) > 0.99, "unlifted, the lowest mode is a rigid translation"
+        Hl = _lift_translations(H, cell)
+        wl, Vl = np.linalg.eigh(Hl)
+        assert np.linalg.norm(T.T @ Vl[:, 0]) < 0.01
+        assert np.allclose(Hl @ T, max(1.0, w.max()) * T)
+        assert np.allclose(wl[:-3], w[3:], atol=1e-5), "every other eigenvalue unchanged"
+
+    def test_lift_leaves_a_hessian_with_frozen_atoms_unchanged(self):
+        from saddlemill.sellaopt import _lift_translations
+        slab = _cu_slab()
+        H = _fd_hessian(slab)
+        assert _lift_translations(H, slab) is H
+
+    def test_seeded_bulk_mode_is_not_a_rigid_translation(self):
+        """Regression (FM1 dry run, 2026-09-30): seeded with an exact Hessian, a bulk
+        cell's reported lowest mode was a rigid translation, and the delocalization
+        guard stopped 153 of 200 runs."""
+        from saddlemill.sellaopt import _mode_and_curvature, _setup_sella
+        cell = _cu_bulk(); n = len(cell)
+        dyn, _ = _setup_sella(cell, EMT(), hessian=_fd_hessian(cell))
+        dyn.step()
+        mode, _ = _mode_and_curvature(dyn, n)
+        assert mode is not None
+        v = mode / np.linalg.norm(mode)
+        assert np.linalg.norm(v.sum(axis=0)) / np.sqrt(n) < 0.01, "overlap with the rigid translations"
 
     def _run(self, tmp_path, monkeypatch, hessian, initial_hessian, steps=5):
         from saddlemill.sellaopt import sellaopt

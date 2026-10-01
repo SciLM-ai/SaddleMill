@@ -42,7 +42,7 @@ from saddlemill.dimertools.structure_edit import get_attempts
 from saddlemill.tools import (backup_flux_logs, get_task_name, resolve_vasp_calc,
                               remove_vasp_heavies, finalize_if_vasp_interactive,
                               archive_and_clear_temp_files, hessian_index,
-                              lowest_mode)
+                              lowest_mode, _fixed_indices)
 
 
 class StopRun(Exception):
@@ -121,6 +121,29 @@ def _mode_and_curvature(dyn, natoms):
         return None, None
 
 
+def _lift_translations(H, atoms):
+    """Move the three rigid translations to the top of a seeded Hessian's spectrum.
+
+    An exact Hessian of a cell with no frozen atoms has ~zero eigenvalues along
+    the rigid translations, some numerically negative (~-1e-5 eV/A^2). Sella
+    projects translations out of its steps, but its full-space model keeps them,
+    so once the structure has no real negative curvature `_mode_and_curvature`
+    reports a translation as the lowest mode and the delocalization guard stops
+    the run. Cells with frozen atoms have no translational null space and are
+    returned unchanged.
+    """
+    if _fixed_indices(atoms):
+        return H
+    n = len(atoms)
+    T = np.zeros((3 * n, 3))
+    for k in range(3):
+        T[k::3, k] = 1.0 / np.sqrt(n)
+    P = T @ T.T
+    Q = np.eye(3 * n) - P
+    lift = max(1.0, float(np.linalg.eigvalsh(H).max()))
+    return Q @ H @ Q + lift * P
+
+
 def _setup_sella(atoms, calc, eigenmode=None, displacement_dict=None,
                  sella_kwargs=None, dimer_control_kwargs=None,
                  control_logfile=None, logfile=None, trajectory=None,
@@ -138,6 +161,8 @@ def _setup_sella(atoms, calc, eigenmode=None, displacement_dict=None,
     curvature and Sella's first iterative diagonalization only has to correct
     an already-exact model. Sella projects out constrained DOF itself, which is
     consistent with the stored constrained Hessian (fixed rows/columns zero).
+    With no frozen atoms the rigid translations are lifted first
+    (`_lift_translations`).
     """
     from sella import Sella
 
@@ -152,7 +177,7 @@ def _setup_sella(atoms, calc, eigenmode=None, displacement_dict=None,
     # and Sella's internal-coordinate machinery targets molecular systems.
     kw.setdefault("internal", False)
     if hessian is not None:
-        kw["H0"] = np.asarray(hessian, dtype=float)
+        kw["H0"] = _lift_translations(np.asarray(hessian, dtype=float), atoms)
     dyn = Sella(atoms, logfile=logfile, trajectory=trajectory, **kw)
 
     seeded = _seed_eigenmode(dyn, eigenmode)
