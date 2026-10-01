@@ -1,6 +1,6 @@
 import configparser
 import csv
-import os, re, glob, copy, pathlib, zipfile
+import os, re, glob, copy, pathlib, warnings, zipfile
 from ase.io import Trajectory
 
 VALID_RUN_CATEGORIES = frozenset({"converged", "not_converged", "errored", "remaining"})
@@ -54,12 +54,12 @@ class ConfigManager:
             #                         no diagonalization. What [ourSella]
             #                         initial_hessian consumes.
             #   compute_eigenmodes -> diagonalize the constraint-projected Hessian
-            #                         and store eigenvalues / eigenmodes (lowest
-            #                         hessian_nev_store), not the matrix.
-            #                         eigenmodes[0] seeds the next Dimer/Sella run.
+            #                         and store eigenvalues (all), eigenvalues3,
+            #                         eigenmodes3 and eigenmodes_compressed, not
+            #                         the matrix. eigenmodes3[0] seeds the next
+            #                         Dimer/Sella run.
             "compute_hessian": False,
             "compute_eigenmodes": False,
-            "hessian_nev_store": 8,   # eigenpairs to keep with compute_eigenmodes; -1 = all
             "hessian_chunk": 1,       # vmap rows per batch; raise for speed if memory allows
             "frames_per_job": 1,  # 1 (default) | 3. With 3, each executorlib job processes a triplet (e.g. DM min1/TS/min2) in a single batched FAIRChem forward pass. VASP requires 1.
             "vasp_command": None,
@@ -109,12 +109,11 @@ class ConfigManager:
             "engine": "ase",            # ase (stock ASE dimer) | kappa
             "kappa_beta": 2.0,          # only used when engine = kappa
             "kappa_recover_fmax": 0.3,  # only used when engine = kappa
-            # Independent finite-difference Lanczos index check on converged
-            # saddles (off by default; costs ~2*index_nev*iters extra force
-            # calls). Records nneg/eigenvalues in .info - it never changes the
+            # Deprecated independent finite-difference Lanczos index check on
+            # converged saddles (off by default; costs ~2*3*iters extra force
+            # calls). Records nneg/approx_eigenvalues3 in .info - it never changes the
             # status string, so run_jobs/input_statuses behaviour is unaffected.
             "check_index": False,
-            "index_nev": 4,
             "index_eps": 2e-3,
             "index_tol": 1e-2,
             "vasp_command": None,
@@ -137,7 +136,6 @@ class ConfigManager:
             "extension_check_curvature": -0.2,
             # Independent finite-difference Lanczos index check (see [ourDimer]).
             "check_index": False,
-            "index_nev": 4,
             "index_eps": 2e-3,
             "index_tol": 1e-2,
             # Start Sella from the exact Hessian stored on the input frame
@@ -387,6 +385,14 @@ def load_method(config_dict):
              ("input_generator", "extra_input_files", "extra_outputs")):
         print(f"Warning: [ourVasp] settings are set but Calculator={calc_name!r} "
               f"is not VASP; they will be ignored.")
+
+    index_section = {"Dimer": "ourDimer", "Sella": "ourSella"}.get(method_name)
+    if index_section and config_dict.get(index_section, {}).get("check_index"):
+        warnings.warn(
+            f"[{index_section}] check_index is deprecated and will be removed. Run a "
+            f"separate SinglePoint pass with [ourSinglePoint] compute_eigenmodes = "
+            f"True instead; its exact eigenvalues give the saddle index.",
+            FutureWarning)
 
     if method_name == "NEB":
         from saddlemill.nebopt import nebopt as method

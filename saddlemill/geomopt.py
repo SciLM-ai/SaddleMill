@@ -140,11 +140,11 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
         orig = atoms.info.get('orig_info', {})
         parent_source_idx = orig.get('src_index')
         try:
-            # Exact Hessian mode (eigenmodes[0]) if present, else the saddle
+            # Exact Hessian mode (eigenmodes3[0]) if present, else the saddle
             # search's approx_eigenmode.
             refined_eigenmode, curvature, exact_mode = lowest_mode(orig)
             if refined_eigenmode is None:
-                raise Exception("Input structure missing 'eigenmodes' or 'approx_eigenmode' in info.")
+                raise Exception("Input structure missing 'eigenmodes3' or 'approx_eigenmode' in info.")
             if 'src_index' not in orig:
                 raise Exception("Input structure missing 'src_index' in info.")
 
@@ -301,11 +301,11 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
             ts_atoms.info['src_index'] = i
             # Stamp the mode used under its own label, one level up where the
             # next reader looks. The TS geometry is unchanged, so an exact,
-            # unrefined mode stays exact.
+            # unrefined mode stays exact: copy the input's 3 lowest as they are.
             if exact_mode:
-                ts_atoms.info['eigenmodes'] = refined_eigenmode[None]  # (1, N, 3)
+                ts_atoms.info['eigenmodes3'] = orig['eigenmodes3']
                 if curvature is not None:
-                    ts_atoms.info['eigenvalues'] = [curvature]
+                    ts_atoms.info['eigenvalues3'] = orig['eigenvalues3']
             else:
                 ts_atoms.info['approx_eigenmode'] = refined_eigenmode
                 if curvature is not None:
@@ -522,7 +522,6 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
                 # 33-atom cell when the Hessian leads.
                 hess_extra = hessian_outputs(
                     a,
-                    nev_store=our_sp.get("hessian_nev_store", 8),
                     chunk=our_sp.get("hessian_chunk", 1),
                     compute_hessian=want_hessian,
                     compute_eigenmodes=want_eigen,
@@ -552,10 +551,11 @@ def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
             # lmdb info is one flat level, so a new VTST approx_eigenmode would sit
             # next to an exact spectrum from the geometry before VASP moved it, and
             # lowest_mode prefers the exact one. Drop that stale spectrum.
-            stale = (("eigenmodes", "eigenvalues", "hessian")
+            stale = (("eigenvalues", "eigenvalues3", "eigenmodes3",
+                      "eigenmodes_compressed", "hessian")
                      if "approx_eigenmode" in sm_extra else ())
             if hess_extra:
-                # eigenmodes is (k,N,3); ase.db data= takes nested lists fine.
+                # eigenmodes3 is (3,N,3); ase.db data= takes nested lists fine.
                 sm_extra = {**sm_extra,
                             **{k: (v.tolist() if hasattr(v, "tolist") else v)
                                for k, v in hess_extra.items()}}

@@ -265,7 +265,6 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                 if check_index:
                     eigs, nneg = hessian_index(
                         atoms,
-                        nev=our.get("index_nev", 4),
                         eps=our.get("index_eps", 2e-3),
                         tol=our.get("index_tol", 1e-2),
                     )
@@ -284,7 +283,7 @@ def dimeropt(i, config_dict, atoms_orig, calc, consecutive_errors=None, executor
                 atoms.info['selected_index'] = slctd_indx
                 if nneg is not None:
                     atoms.info['nneg'] = int(nneg)
-                    atoms.info['eigenvalues'] = list(eigs) if eigs is not None else None
+                    atoms.info['approx_eigenvalues3'] = list(eigs) if eigs is not None else None
                 orig = atoms.info.get('orig_info', {})
                 atoms.info['reaction_type'] = atoms.info.get('reaction_type', orig.get('reaction_type', 'unknown'))
                 if stop_reason and "desorbed" in stop_reason:

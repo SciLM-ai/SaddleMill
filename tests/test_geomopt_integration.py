@@ -1,4 +1,4 @@
-"""GPU integration tests for saddlemill/geomopt.py using FAIRChem calculator."""
+"""GPU integration tests for saddlemill/geomopt.py using FAIRChem calculator, plus one CPU test of the DoubleMinimization TS mode."""
 
 import copy
 
@@ -215,46 +215,6 @@ class TestDoubleGeomopt:
                 assert "src_index" in frame.info
                 assert frame.info["src_index"] == 0
 
-    # ----- Test: TS frame carries the mode used, under its own label -----
-
-    @pytest.mark.parametrize("exact", [True, False])
-    def test_ts_frame_carries_mode(self, tmp_path, monkeypatch, fairchem_calc,
-                                   converged_ts_atoms, exact):
-        """The TS frame stamps the mode it displaced along, one level up.
-
-        An exact eigenmodes[0] input comes out as eigenmodes/eigenvalues, an
-        approx_eigenmode input as approx_eigenmode; min1/min2 get neither.
-        """
-        from saddlemill.tools import lowest_mode
-        self._setup_dirs(tmp_path, monkeypatch)
-        config = self._make_config(steps=2)
-
-        info = dict(converged_ts_atoms.info)
-        mode = np.array(info["approx_eigenmode"])
-        if exact:
-            del info["approx_eigenmode"]
-            info["eigenmodes"] = np.array([mode, np.roll(mode, 1, axis=0)])
-            info["eigenvalues"] = [-0.31, 0.52]
-        atoms = converged_ts_atoms.copy()
-        atoms.info = {"orig_info": info}
-
-        doublegeomopt(0, config, atoms, fairchem_calc, MDMin,
-                      consecutive_errors=[0], executorlib_worker_id=0)
-
-        with self._read_output_traj(tmp_path) as traj:
-            frames = {traj[idx].info["side"]: traj[idx] for idx in range(3)}
-        ts_mode, ts_curv, ts_exact = lowest_mode(frames[0].info)
-        assert ts_exact is exact
-        np.testing.assert_allclose(ts_mode, mode)
-        if exact:
-            assert ts_curv == -0.31
-            assert "approx_eigenmode" not in frames[0].info
-            assert np.shape(frames[0].info["eigenmodes"]) == (1,) + mode.shape
-        else:
-            assert "eigenmodes" not in frames[0].info
-        for side in (-1, 1):
-            assert lowest_mode(frames[side].info)[0] is None
-
     # ----- Test: entries_to_run one side -----
 
     def test_entries_to_run_one_side(self, tmp_path, monkeypatch, fairchem_calc, converged_ts_atoms):
@@ -310,3 +270,52 @@ class TestDoubleGeomopt:
         # CSV should have 2 lines from first run + 1 from second run (only side=1)
         csv_lines = self._read_csv(tmp_path)
         assert len(csv_lines) == 3  # 2 from first + 1 from second
+
+
+# ----- Test: TS frame carries the mode used, under its own label (CPU) -----
+
+@pytest.mark.parametrize("exact", [True, False])
+def test_ts_frame_carries_mode(tmp_path, monkeypatch, converged_ts_atoms, exact):
+    """The TS frame stamps the mode it displaced along, one level up.
+
+    An exact eigenmodes3[0] input comes out as the input's eigenmodes3 /
+    eigenvalues3 copied verbatim, an approx_eigenmode input as
+    approx_eigenmode; min1/min2 get neither. Runs on CPU with LennardJones:
+    this bookkeeping does not depend on the calculator.
+    """
+    from ase.calculators.lj import LennardJones
+    from saddlemill.tools import lowest_mode
+    monkeypatch.chdir(tmp_path)
+    for sub in ("status_csvs", "trajes", "debug_zips"):
+        (tmp_path / f"DoubleMinimization_{sub}").mkdir()
+    config = make_config_dict(method="DoubleMinimization", steps=2, fmax=0.05,
+                              Optimizer="MDMin")
+
+    info = dict(converged_ts_atoms.info)
+    mode = np.array(info["approx_eigenmode"])
+    if exact:
+        del info["approx_eigenmode"]
+        info["eigenmodes3"] = np.array([mode, np.roll(mode, 1, axis=0),
+                                        np.roll(mode, 2, axis=0)])
+        info["eigenvalues3"] = [-0.31, 0.52, 0.60]
+    atoms = converged_ts_atoms.copy()
+    atoms.info = {"orig_info": info}
+
+    doublegeomopt(0, config, atoms, LennardJones(rc=5.0), MDMin,
+                  consecutive_errors=[0], executorlib_worker_id=0)
+
+    traj_path = tmp_path / "DoubleMinimization_trajes" / "collected_opt_rank_0.traj"
+    with Trajectory(str(traj_path), "r") as traj:
+        frames = {frame.info["side"]: frame for frame in traj}
+    ts_mode, ts_curv, ts_exact = lowest_mode(frames[0].info)
+    assert ts_exact is exact
+    np.testing.assert_allclose(ts_mode, mode)
+    if exact:
+        assert ts_curv == -0.31
+        assert "approx_eigenmode" not in frames[0].info
+        np.testing.assert_array_equal(frames[0].info["eigenmodes3"], info["eigenmodes3"])
+        assert list(frames[0].info["eigenvalues3"]) == [-0.31, 0.52, 0.60]
+    else:
+        assert "eigenmodes3" not in frames[0].info
+    for side in (-1, 1):
+        assert lowest_mode(frames[side].info)[0] is None

@@ -358,6 +358,17 @@ class TestLoadMethod:
         with pytest.raises(ValueError, match=required_key):
             load_method(config)
 
+    @pytest.mark.parametrize("method", ["Dimer", "Sella"])
+    def test_check_index_is_deprecated(self, method, recwarn):
+        """check_index = False is silent; True warns once, pointing to compute_eigenmodes."""
+        config = make_config_dict(method=method)
+        load_method(config)
+        config["our" + method]["check_index"] = True
+        load_method(config)
+        msgs = [str(w.message) for w in recwarn
+                if issubclass(w.category, FutureWarning) and "check_index" in str(w.message)]
+        assert len(msgs) == 1 and "compute_eigenmodes" in msgs[0]
+
     def test_vasp_command_present_loads(self):
         """A method with all required VASP command keys loads cleanly."""
         config = make_config_dict(method="Dimer", Calculator="Vasp",

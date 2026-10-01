@@ -358,8 +358,8 @@ class TestInitialGuess:
         from saddlemill.tools import lowest_mode
         _seed()
         atoms = bulk("Cu", "fcc", a=3.6, cubic=True) * (2, 2, 2)
-        modes = np.random.randn(2, len(atoms), 3)
-        atoms.info["orig_info"] = {"eigenmodes": modes, "eigenvalues": [-0.3, 0.2]}
+        modes = np.random.randn(3, len(atoms), 3)
+        atoms.info["orig_info"] = {"eigenmodes3": modes, "eigenvalues3": [-0.3, 0.2, 0.4]}
         images, dds, idxs = get_initial_guess_attempts(atoms)
         assert "approx_eigenmode" not in images[0].info
         mode, _, exact = lowest_mode(images[0].info["orig_info"])

@@ -192,7 +192,7 @@ inside `_setup_sella()`, so every other method runs without it installed.
   (153/200 seeded bulk runs from noisy starts in the FM1 dry run, 2026-09-30).
 - **Extra output keys** vs Dimer: `n_steps`, `eigenmode_seeded` (0/1),
   `hessian_seeded` (0/1), and — when `[ourSella] check_index = True` — `nneg` and
-  `eigenvalues`.
+  `approx_eigenvalues3`.
 
 **Status vocabulary is identical to Dimer** (`converged`,
 `converged_after_extension`, `converged_to_desorption`, `not_converged`,
@@ -203,7 +203,7 @@ reported in `.info['nneg']` instead.
 
 ### Saddle index verification — `tools.hessian_index()`
 
-`hessian_index(atoms, nev=4, eps=2e-3, tol=1e-2)` returns
+`hessian_index(atoms, nev=3, eps=2e-3, tol=1e-2)` returns
 `(eigenvalues, n_negative)` from a finite-difference Lanczos on the lowest `nev`
 Hessian eigenvalues. It never forms the Hessian (`eigsh` only needs `H @ v`, and
 `H @ v` is one central difference of forces — 2 force calls per matvec), and it
@@ -217,6 +217,12 @@ homework. Both methods route through this one function, gated by
 indices are directly comparable. A genuine first-order saddle has exactly one
 eigenvalue below `-tol`; `n_negative >= 2` is a higher-order saddle.
 
+`check_index` is deprecated and will be removed; `load_method` emits a
+`FutureWarning` when it is on and recommends a SinglePoint pass with
+`[ourSinglePoint] compute_eigenmodes = True`, whose exact `eigenvalues` give
+the index. The check stores its Lanczos estimate of the 3 lowest eigenvalues
+as `approx_eigenvalues3`, so its `nneg` is at most 3.
+
 ### Exact Hessian from a SinglePoint pass — `[ourSinglePoint] compute_hessian` / `compute_eigenmodes`
 
 `method = SinglePoint` can compute the exact analytical Hessian of every frame
@@ -226,10 +232,10 @@ independent switches; the Hessian is computed once if either is on:
 | switch | stored in `.info` | diagonalization |
 |---|---|---|
 | `compute_hessian = True` | `hessian`: the constrained Hessian in full (3N, 3N) Cartesian layout, eV/Å², atom order — rows **and** columns of fixed atoms are zero | none |
-| `compute_eigenmodes = True` | `eigenvalues` (lowest `hessian_nev_store`, ascending, `-1` = all), `eigenmodes` ((k, N, 3), zero on fixed atoms) | of the constraint-projected Hessian (free DOF only) |
+| `compute_eigenmodes = True` | `eigenvalues` (all n = 3·nfree, ascending), `eigenvalues3` (the 3 lowest), `eigenmodes3` ((3, N, 3), zero on fixed atoms), `eigenmodes_compressed` (all n modes in Householder form, n(n-1)/2 float64) | of the constraint-projected Hessian (free DOF only) |
 | both | all of the above | yes |
 
-`eigenmodes[0]` is the mode `dimeropt`, `sellaopt`, `doublegeomopt` and the
+`eigenmodes3[0]` is the mode `dimeropt`, `sellaopt`, `doublegeomopt` and the
 VTST `modecar` writer seed from, and `hessian` is what `[ourSella]
 initial_hessian` consumes, so a SinglePoint pass feeds the next saddle search
 exactly. `tools.hessian_request()` gives
@@ -238,23 +244,30 @@ commit `fe37822`, `compute_hessian = True` produced the eigen summary (what is n
 `compute_eigenmodes`); it now stores the matrix only — old configs that relied on
 it for mode seeding must switch to `compute_eigenmodes = True`.
 
-**Mode keys (renamed 2026-09-30, clean break).** A saddle search stores its own
+`tools.decompress_eigenmodes(compressed, atoms)` returns all n modes as
+(n, N, 3), zero on fixed atoms, in the order of `eigenvalues`; the sign of each
+mode is arbitrary. `tools.compress_eigenmodes(V)` stores the Householder
+vectors from the QR factorization of the eigenvector matrix V, about half the
+size of V. Translation modes are kept, so on a structure with no fixed atoms
+three of the `eigenvalues` are near zero and can appear in `eigenvalues3`.
+
+**Mode keys (renamed 2026-09-30 and 2026-10-01, clean breaks).** A saddle search stores its own
 estimate of the lowest mode as `approx_eigenmode` / `approx_curvature`: Dimer and
 Sella (rotated dimer or P-RFO mode), the NEB CI (tangent), the DoubleMinimization
 TS (the mode it displaced along), and the VTST `vtst_dimer` parser. Only a
-SinglePoint `compute_eigenmodes` pass computes the exact `eigenvalues` /
-`eigenmodes`; a DoubleMinimization TS frame that displaced along an exact,
-unrefined mode re-stamps it as `eigenmodes` (lowest only, shape (1, N, 3)) /
-`eigenvalues`, one level up where the next reader looks; the Dimer/Sella `check_index` output reuses the name `eigenvalues`
-for its Lanczos estimate, next to `nneg`. `tools.lowest_mode(info)` reads one
-`.info` level and returns `(mode, curvature, exact)`, preferring
-`eigenmodes[0]` / `eigenvalues[0]` over `approx_eigenmode` / `approx_curvature`;
+SinglePoint `compute_eigenmodes` pass computes the exact modes (keys in the
+table above); a DoubleMinimization TS frame that displaced along an exact,
+unrefined mode copies the input's `eigenmodes3` / `eigenvalues3` unchanged, one
+level up where the next reader looks. The Dimer/Sella `check_index` output
+stores its Lanczos estimate as `approx_eigenvalues3`, next to `nneg`.
+`tools.lowest_mode(info)` reads one `.info` level and returns
+`(mode, curvature, exact)`, preferring `eigenmodes3[0]` / `eigenvalues3[0]` over `approx_eigenmode` / `approx_curvature`;
 every reader calls it on the top level, then on `orig_info`. Lmdb `data['info']`
 is a single level, so when a SinglePoint's VASP parser writes a new
-`approx_eigenmode` there, it drops the row's `eigenmodes` / `eigenvalues` /
-`hessian`, which describe the geometry before VASP moved it. The pre-rename keys
-`eigenmode` / `curvature` are not read by the package, so an output written
-before the rename seeds nothing; `scripts/` still fall back to `eigenmode`.
+`approx_eigenmode` there, it drops the row's `eigenvalues` / `eigenvalues3` /
+`eigenmodes3` / `eigenmodes_compressed` / `hessian`, which describe the geometry before VASP moved it. The older keys
+`eigenmode` / `curvature` (before 2026-09-30) and `eigenmodes` (2026-09-30)
+are not read by the package, so an output written with them seeds nothing; `scripts/` still fall back to `eigenmode`.
 
 - **Cost.** fairchem builds the Hessian as one vector-Jacobian product per row
   through the force graph and batches them with `torch.vmap`; `hessian_chunk`
@@ -290,7 +303,7 @@ Reaction types configured via `reaction_types` (space-separated list). Bulk and 
 | `kickout_reuse` | `get_kickout_reuse_attempts()` | Existing atom to interstitial, kicks nearest into another | 2 (vector) |
 | `kickout_insert` | `get_kickout_insert_attempts()` | New similar-sized atom at interstitial, kicks nearest lattice atom | 2 (vector) |
 | `ring` | `get_ring_attempts()` | Ring of 2+ atoms rotate cooperatively; size from `ring_sizes` config. `ring_sizes = 2` for pairwise exchange. | N (vector) |
-| `initial_guess` | `get_initial_guess_attempts()` | No displacement — starts from input as-is (supercell skipped). For pre-prepared TS guesses. Exclusive: ignores other types with warning. Always 1 attempt. Works with both `bulk` and `oc`. Copies `atoms.info['orig_info']['approx_eigenmode']` to the attempt if present; an exact `eigenmodes` stays in `orig_info`, where `dimeropt`/`sellaopt` read it (`tools.lowest_mode`). | 0 (none) |
+| `initial_guess` | `get_initial_guess_attempts()` | No displacement — starts from input as-is (supercell skipped). For pre-prepared TS guesses. Exclusive: ignores other types with warning. Always 1 attempt. Works with both `bulk` and `oc`. Copies `atoms.info['orig_info']['approx_eigenmode']` to the attempt if present; an exact `eigenmodes3` stays in `orig_info`, where `dimeropt`/`sellaopt` read it (`tools.lowest_mode`). | 0 (none) |
 
 All bulk types (except `initial_guess`) route directed displacement candidates through `_maybe_gaussian()`, which with 10% probability replaces the directed vector with broad isotropic Gaussian noise on the same atom set — keeps a stochastic exploration tail on top of the geometric heuristics.
 
@@ -327,7 +340,7 @@ Adsorbate atoms: tag=2 only (no fallback). Substrate (tag=0) fixed via `FixAtoms
 
 ### `geomopt.py` - Geometry Optimization
 - `geomopt()`: Standard relaxation with optional cell relaxation (FrechetCellFilter). Output frames carry `task_name` (from `get_task_name`).
-- `doublegeomopt()`: Takes converged TS with eigenmode, displaces ±0.25*eigenmode, relaxes both directions, detects bond breaking/forming via `check_reaction()` and `check_adsorbate_reaction()`. Reads the mode via `tools.lowest_mode` (`eigenmodes[0]`, else `approx_eigenmode`), `converged`, `src_index` from `atoms.info['orig_info']` (fallback `atoms.info`). Each frame gets `side` in `.info` (-1=min1, 0=ts, 1=min2). Writes 2 CSV lines per job in the form `{job_id},{rank},{side_id},{parent_source_idx},"{status_msg}"`. Accepts `entries_to_run`/`continuation_data` for per-side execution. Optional `pre_dimer_refine=True` (default False) runs a rotation-only dimer step via `_refine_eigenmode()` from `dimeropt.py` to refine the eigenmode direction before displacement. Rotation parameters controlled by `[DimerControl]` section (especially `max_num_rot`, `dimer_separation`). Stores the mode it displaced along on the TS output frame's `.info` under its own label: an exact, unrefined `eigenmodes[0]` as `eigenmodes` (shape (1, N, 3)) / `eigenvalues`, otherwise (an `approx_eigenmode` input, or any mode refined by `pre_dimer_refine`) as `approx_eigenmode` (plus `approx_curvature` when known). The full reaction-detection metadata dict (`is_reaction`, `n_formed_bonds`, `n_broken_bonds`, `broken_bonds`, `formed_bonds`, plus `is_ads_reaction` / `n_ads_formed_bonds` / `n_ads_broken_bonds` / `ads_broken_bonds` / `ads_formed_bonds` for OC inputs) is copied onto every emitted frame (min1, TS, min2) along with `parent_ts_index` and `task_name`.
+- `doublegeomopt()`: Takes converged TS with eigenmode, displaces ±0.25*eigenmode, relaxes both directions, detects bond breaking/forming via `check_reaction()` and `check_adsorbate_reaction()`. Reads the mode via `tools.lowest_mode` (`eigenmodes3[0]`, else `approx_eigenmode`), `converged`, `src_index` from `atoms.info['orig_info']` (fallback `atoms.info`). Each frame gets `side` in `.info` (-1=min1, 0=ts, 1=min2). Writes 2 CSV lines per job in the form `{job_id},{rank},{side_id},{parent_source_idx},"{status_msg}"`. Accepts `entries_to_run`/`continuation_data` for per-side execution. Optional `pre_dimer_refine=True` (default False) runs a rotation-only dimer step via `_refine_eigenmode()` from `dimeropt.py` to refine the eigenmode direction before displacement. Rotation parameters controlled by `[DimerControl]` section (especially `max_num_rot`, `dimer_separation`). Stores the mode it displaced along on the TS output frame's `.info` under its own label: for an exact, unrefined `eigenmodes3[0]` it copies the input's `eigenmodes3` / `eigenvalues3` unchanged, otherwise (an `approx_eigenmode` input, or any mode refined by `pre_dimer_refine`) it stores `approx_eigenmode` (plus `approx_curvature` when known). The full reaction-detection metadata dict (`is_reaction`, `n_formed_bonds`, `n_broken_bonds`, `broken_bonds`, `formed_bonds`, plus `is_ads_reaction` / `n_ads_formed_bonds` / `n_ads_broken_bonds` / `ads_broken_bonds` / `ads_formed_bonds` for OC inputs) is copied onto every emitted frame (min1, TS, min2) along with `parent_ts_index` and `task_name`.
 - **Desorption-skip logic**: when `check_adsorbate_reaction()` flags the bond change as a desorption, the higher-energy side is skipped to avoid relaxing into vacuum; that side gets `side_statuses[side] = "converged_desorption_skipped"` while the other side still runs normally. The TS frame's `status` always reflects the converged TS itself.
 - `singlepoint()`: One E/F call per frame. Only method that supports `.aselmdb` input (via `[Main] input_format = lmdb`). With `[ourSinglePoint] frames_per_job = N` (any positive integer) it bundles N frames per executorlib job and computes their energies and forces in a single batched FAIRChem forward pass via `fairchem.core.datasets.atomic_data.atomicdata_list_to_batch` + `calc.predictor.predict`, then writes the frames contiguously in input order to the same rank shard. Per-frame `natoms` may vary within a batch — forces are sliced by cumulative `natoms` offsets. The last batch in each shard may be smaller than N (no divisibility check). For triplet-respecting use cases (e.g. DM output min1/TS/min2), pick N as a multiple of 3 so triplets stay intact. No optimizer and no temp log/traj files; no debug zips for FAIRChem (VASP SP keeps them — see the VASP note below). Output goes to `SinglePoint_trajes/collected_sp_rank_{rank}.traj` (traj input) or `SinglePoint_lmdbs/collected_sp_rank_{rank}.aselmdb` (lmdb input). LMDB output preserves the source row's `key_value_pairs` and `data` (`info` + `traj_path`) verbatim and populates `row.energy` / `row.forces` via `SinglePointCalculator`. Does **not** call `atoms.wrap()` — the structure is untouched, only E/F are added. The SinglePoint contract is to leave the source structure and its info untouched and only add E/F (plus any opted-in `extra_outputs`); because `ase.db` never serializes `atoms.info` (only the explicit `data=` blob), the `src_index`/`status`/`task_name` bookkeeping that traj output stamps onto `.info` is traj-output-only — the lmdb exceptions are opted-in `extra_outputs` and (for VASP) a `converged` flag, merged into `data['info']` (see VASP note below). **VASP/VaspInteractive**: supported with `frames_per_job = 1` only (no batched DFT). Each job uses one `VASP_{i}/` scratch dir; on success the heavies (WAVECAR/CHG/CHGCAR) are dropped and the rest is archived into `SinglePoint_debug_zips/structure_rank_{rank}_data.zip` exactly like the other VASP methods (gated on `[Main] zip`; `zip = False` just deletes the dir — the old behavior), and on error the dir is archived with an `ERROR_` prefix. After the run, anything an `[ourVasp] extra_outputs` parser left on `calc.sm_extra_outputs` (e.g. VTST `approx_eigenmode`/`approx_curvature`) is merged into the output frame's `.info` (traj output) or the output row's `data['info']` (lmdb output) before that archiving — the opted-in extras ride along regardless of output format. **For VASP the per-frame `status` is the real convergence verdict** — `calc.converged` (ASE's OUTCAR 'reached required accuracy', valid for `ibrion in [1,2,3]`/`nsw!=0`) OR the EDIFFG force criterion VTST itself uses (max per-atom `|F| <= |EDIFFG|` on the true force, *not* the DIMCAR total-norm `Force`) — never an unconditional `converged`; a final ionic step whose SCF didn't reach EDIFF logs `error: scf_not_converged` (`tools.vasp_final_scf_converged`), and `info['converged']` / lmdb `data['info']['converged']` records 1/0. A VTST dimer that drifts toward a minimum simply never meets EDIFFG → `not_converged` (it cannot converge to a minimum: `dimer.F` `ProjectDimer` climbs uphill when curvature ≥ 0). FAIRChem SP (and any `nsw=0` single-point) stays unconditional `converged`. LMDB input restricted to `run_jobs = remaining`.
 
@@ -338,7 +351,7 @@ Adsorbate atoms: tag=2 only (no fallback). Substrate (tag=0) fixed via `FixAtoms
 - `clean_up_files(config_dict)`: Removes leftover temp files on resume. Method-aware: NEB (`neb_*.log/traj`, `reactant/product_relaxation_*`, `imin_relax_*`, `diffusion_barrier_*.png`, `VASP_*_*/`), Dimer (`dimer_*.log/traj`), Minimization (`optimization_*.log/traj`).
 - `backup_flux_logs(worker_id)`: Snapshots flux log files for a worker before it self-kills, so the post-restart logs don't overwrite the diagnostic trail.
 - `get_task_name(config_dict)`: Returns `[FAIRChemCalculator] task_name` if FAIRChem is the calculator, else `None`. Used by all methods to stamp `task_name` on output frames so downstream consumers know which UMA task generated them.
-- `lowest_mode(info)`: `(mode, curvature, exact)` from one `.info` level, `eigenmodes[0]` before `approx_eigenmode` (see **Mode keys** above). Used by every mode reader: `dimeropt`, `sellaopt`, `doublegeomopt`, `vasp_io.write_modecar`.
+- `lowest_mode(info)`: `(mode, curvature, exact)` from one `.info` level, `eigenmodes3[0]` before `approx_eigenmode` (see **Mode keys** above). Used by every mode reader: `dimeropt`, `sellaopt`, `doublegeomopt`, `vasp_io.write_modecar`.
 - **Previous result extraction**: `extract_previous_results(job_ids, config_dict, redo_info)` — unified extraction from output trajs for all methods. Returns `{job_id: continuation_data}` (Dimer: `{attempt_id: Atoms}`, NEB: `{subband_idx: [Atoms]}`, DoubleMinimization: `{side: Atoms}`, Minimization: `Atoms`). Helpers: `_build_output_traj_index()`, `_sanitize_with_continuation()`.
 - `get_bond_set()`, `check_reaction()`, `check_adsorbate_reaction()`: Bond detection via ASE neighbor_list with natural cutoffs, compare connectivity between structures.
 - **VASP helpers**: `resolve_vasp_calc(config_dict, calc, i, subunit_id, section, atoms=None)` builds a per-job-unit `Vasp`/`VaspInteractive` instance (FAIRChem path returns the shared instance). `vasp_incar_kwargs(config_dict, atoms=None)` computes the calculator's INCAR/k-point/setup kwargs: it evaluates an optional `[ourVasp] input_generator` on `atoms`, then layers the explicit `[Vasp]` keys on top so **`[Vasp]` always wins** (per-tag precedence: `[Vasp]` > generator > ASE default). `[Vasp]` is passed verbatim to ASE (the orchestration keys live in `[ourVasp]`, never in `[Vasp]`); with no generator or no `atoms` the result is just the `[Vasp]` section. `resolve_vasp_calc_class(config_dict, calc)` wraps the calc class via `_with_extra_io()` when `[ourVasp] extra_input_files` and/or `extra_outputs` are set: the subclass's `write_input` drops extra files in (e.g. a VTST MODECAR), and its `read_results` runs output parsers and stashes their merged dict on `calc.sm_extra_outputs`. Used by both `resolve_vasp_calc` and `nebopt._build_neb_vasp_calc` so the hooks are uniform across all methods. `remove_vasp_heavies()` / `finalize_if_vasp_interactive()` / `archive_and_clear_temp_files()` round out the VASP lifecycle helpers.
@@ -347,7 +360,7 @@ Adsorbate atoms: tag=2 only (no fallback). Substrate (tag=0) fixed via `FixAtoms
 A *generator* is a callable `generator(atoms) -> dict` of ASE-`Vasp` kwargs (lowercased INCAR tags + `kpts`/`gamma`/`setups`/`magmom`). Selected via `[ourVasp] input_generator` (a SaddleMill section — **not** `[Vasp]`, which is a pure ASE pass-through), which may be a built-in name (`omat24_static`, `omat24_relax`, `cheap_omat`, `oc20`, `cheap_oc20`, `oc22`, `cheap_oc22`), a dotted `module:func`, or a `/path/file.py:func`. SaddleMill never lets the generator write files — it only computes *settings*, which `vasp_incar_kwargs` merges under `[Vasp]` and hands to ASE, so atom sorting / force resort / POTCAR / VaspInteractive interactive-flags stay correct. Applies to **all five methods** (every per-job-unit calc routes through `vasp_incar_kwargs`). `load_input_generator(spec)` resolves the spec (validated fail-fast in `load_method`; `_import_callable` handles the `module:func` / `file.py:func` forms, shared with the writer loader below). Built-in adapters convert a pymatgen `VaspInputSet` (`AseAtomsAdaptor.get_structure` → `OMat24*Set(struct, sort_structure=False)`) into ASE kwargs via `_pmg_set_to_ase_kwargs` (which also rewrites pymatgen's *positional* `LDAUU`/`LDAUL`/`LDAUJ` lists — aligned to pymatgen's `poscar.site_symbols` — into ASE's element-keyed `ldau_luj` dict, so DFT+U survives ASE's alphabetical atom re-sort and lands on the right species rather than being silently misassigned; `MAGMOM` needs no such fix since it is per-atom and ASE re-sorts it). `cheap_omat` is a reduced-cost OMat24 variant for a first-pass saddle search — `reciprocal_density` 16 (vs 64) plus `minimal`-base light POTCARs (plain transition metals, soft `_s` O/C/N) so ENCUT can drop to ~300; reconverge the result with `omat24_static`. `oc20` uses `fairchem.data.oc`'s `VASP_FLAGS` + `calculate_surface_k_points` — exactly Meta's OC20 settings (RPBE, ENCUT 350, no spin, `minimal` setups). `oc22` reproduces Meta's OC22 settings exactly (arXiv:2206.08917 — WhereWulff `MOSurfaceSet` as rendered by 2022-era pymatgen, cross-checked against the paper SI): PBE + MP Hubbard U (element-keyed `ldau_luj`, applied iff O/F present AND a U-metal present), ISPIN 2 with MP-default MAGMOM (atoms' own magmoms win), ENCUT 500, EDIFF 1e-4, ISMEAR 0/SIGMA 0.05, ALGO Fast, PREC Accurate, LREAL False, LASPH/LORBIT 11, NELM 60/NELMIN 8, ISTART 1, LWAVE/LVTOT True, LMAXMIX 4/6 by d/f-block, Γ-centered `ceil(30/a)×ceil(30/b)×1` k-mesh, 2022 MPRelaxSet POTCAR table with the W_sv fix (PBE 5.4 library — `pp_version = 54` in `[Vasp]`), and dipole correction (`ldipol`/`idipol=3`/`dipol`=mass-weighted COM) iff tag==2 adsorbate atoms exist (Meta: adslabs only). The settings are **hardcoded** (tables `_OC22_U`/`_OC22_MAGMOM`/`_OC22_SETUPS`, helper `_oc22_kwargs`), NOT derived via pymatgen — the upstream `OC22_dataset` branch is deprecated and modern pymatgen has drifted from what Meta ran (injects ENAUG=4000/EDIFF 1e-5, changed LDAU applicability, updated POTCAR maps); do not "simplify" oc22 back onto pymatgen sets. `cheap_oc20`/`cheap_oc22` mirror `cheap_omat`: in-plane k-multiplier halved (40→20 / 30→15), `minimal`-base setups with soft `_s` O/C/N and f-in-core lanthanides kept (module-level `_LANTH_FCORE`; cheap_oc22 keeps its parent's `_3`/Yb `_2` picks), everything else — including spin/U/functional — untouched so the cheap pass stays on the same PES; drop ENCUT to ~300 via `[Vasp]`, reconverge with the exact preset. **Ionic-driver tags `IBRION`/`NSW`/`POTIM`/`EDIFFG` (`_DRIVER_KEYS`) are stripped** from generator output — SaddleMill drives geometry through ASE optimizers and VaspInteractive forbids overriding `IBRION`/`POTIM`. Built-ins need `fairchem-data-omat` (omat24_*) or `fairchem-data-oc` (oc20/cheap_oc20); `oc22`/`cheap_oc22` are dependency-free; imports are lazy so the loader works without them.
 
 **Extra-input-file writers** (`[ourVasp] extra_input_files`) and **extra-output parsers** (`[ourVasp] extra_outputs`): a symmetric pair around the VASP run, both applied by `resolve_vasp_calc_class` via the `tools._with_extra_io` calc subclass.
-- *Writers* `writer(calc, atoms, directory) -> None` drop files INTO the dir; they run in the subclass's `write_input` (after ASE writes its inputs, so the dir exists and `calc.sort` is set, before VASP runs). Built-in `write_modecar` reads the lowest mode via `tools.lowest_mode` (`eigenmodes[0]`, else `approx_eigenmode`; `orig_info` fallback), reorders to POSCAR order via `calc.sort`, normalizes, writes `MODECAR` (no-op + warning if no eigenmode).
+- *Writers* `writer(calc, atoms, directory) -> None` drop files INTO the dir; they run in the subclass's `write_input` (after ASE writes its inputs, so the dir exists and `calc.sort` is set, before VASP runs). Built-in `write_modecar` reads the lowest mode via `tools.lowest_mode` (`eigenmodes3[0]`, else `approx_eigenmode`; `orig_info` fallback), reorders to POSCAR order via `calc.sort`, normalizes, writes `MODECAR` (no-op + warning if no eigenmode).
 - *Parsers* `parser(calc, atoms, directory) -> dict` read FROM the dir; they run in the subclass's `read_results` (after VASP finishes, `calc.resort` set) and the merged dict is stashed on `calc.sm_extra_outputs` for the method to stamp onto output frames. Built-in `read_vtst_dimer` returns `approx_eigenmode` (from `NEWMODECAR`, POSCAR→atoms order via `calc.resort`) and `approx_curvature` (last `DIMCAR` row). **SinglePoint** stamps `calc.sm_extra_outputs` onto the output frame's `.info` after the run; other methods leave it unused (they compute their own).
 
 Both share the selection grammar (built-in / `module:func` / `file.py:func`) plus a space-separated **list**, resolved by `load_extra_input_writer` / `load_extra_output_parser` (fail-fast validated in `load_method`). Together they enable a **VASP-internal VTST dimer driven by SaddleMill as a launcher**: `method = SinglePoint`, `Calculator = Vasp`, `[ourVasp] input_generator = omat24_static`, `extra_input_files = modecar`, `extra_outputs = vtst_dimer`, plus VTST INCAR tags in `[Vasp]` (`ichain`, `iopt`, `ibrion=3`, `potim=0`, `nsw`, `ediffg`) — ASE writes even those non-standard tags via its type-based fallback. The SinglePoint output frame then carries the converged saddle geometry + E/F **and** `approx_eigenmode`/`approx_curvature`. Use plain `Vasp` (not `VaspInteractive`, which forces `ibrion=-1`). **Requires a manual ASE patch** until fixed upstream: ASE ≤ 3.28 files `drotmax` under `float_keys` and writes `DROTMAX` as a float (`10.000000`), which VTST silently rejects — move `'drotmax'` to `int_keys` in `ase/calculators/vasp/create_input.py` (guarded by `tests/test_ase_vasp_incar.py`; the `ase` pin will be bumped once fixed).
@@ -447,7 +460,7 @@ xc = PBE
 
 [ourVasp]                          # SaddleMill-side VASP orchestration (optional; only for Calculator = Vasp/VaspInteractive)
 input_generator =                  # INCAR recipe: built-in (omat24_static | omat24_relax | cheap_omat | oc20 | cheap_oc20 | oc22 | cheap_oc22), 'module:func', or '/path/file.py:func'
-extra_input_files =                # files written INTO the VASP dir: built-in 'modecar' (VTST mode from atoms.info eigenmodes[0], else approx_eigenmode), 'module:func', '/path/file.py:func', or a space-separated list
+extra_input_files =                # files written INTO the VASP dir: built-in 'modecar' (VTST mode from atoms.info eigenmodes3[0], else approx_eigenmode), 'module:func', '/path/file.py:func', or a space-separated list
 extra_outputs =                    # parsers read FROM the VASP dir -> merged into output .info: built-in 'vtst_dimer' (approx_eigenmode from NEWMODECAR + approx_curvature from DIMCAR), 'module:func', '/path/file.py:func', or a list. Currently consumed by SinglePoint — stamped onto output `.info` (traj) / merged into `data['info']` (lmdb).
 # Per-tag precedence: [Vasp] key > input_generator output > ASE/VASP default.
 # input_generator yields electronic/accuracy settings only; ionic-driver tags
@@ -537,8 +550,7 @@ supercell = True
 delocalization_threshold = 0.8
 extension_check_fmax = 0.4
 extension_check_curvature = -0.2
-check_index = False          # finite-difference Lanczos index check on converged saddles
-index_nev = 4                # eigenvalues to compute
+check_index = False          # deprecated finite-difference Lanczos index check on converged saddles
 index_eps = 2e-3             # finite-difference step (Å)
 index_tol = 1e-2             # eigenvalue < -tol counts as negative
 # Required when Calculator = Vasp or VaspInteractive:
@@ -689,11 +701,11 @@ All output frames also carry `task_name` (the FAIRChem task that produced them, 
 
 NEB output image metadata: `src_index`, `image_idx`, `subband_idx`, `image_type` (endpoint/intermediate_minimum/climbing/regular), `effective_fmax`, `image_converged`, `band_converged`, `band_converged_CI`, `status`, `nimages`, `interpolation_method`, `imin_set`/`climbing_set`/`frozen_set` (band-wide, stamped on each image), `task_name`, `orig_info`. CI images also get `approx_eigenmode`, `barrier`, `dE`. Every image in a sub-band shares the sub-band's `status` (`converged` / `converged_CI` / `not_converged`). Imin images duplicated for sub-band self-containment. NEB CSV is still per-sub-band lines; band-level run_jobs categorization requires ALL sub-bands converged/converged_CI.
 
-Dimer output: `approx_eigenmode`, `approx_curvature`, `converged`, `src_index`, `attempt_id`, `stoprun`, `selected_index`, `reaction_type`, `status`, `task_name`, `orig_info`. Plus `nneg`/`eigenvalues` when `[ourDimer] check_index = True`.
+Dimer output: `approx_eigenmode`, `approx_curvature`, `converged`, `src_index`, `attempt_id`, `stoprun`, `selected_index`, `reaction_type`, `status`, `task_name`, `orig_info`. Plus `nneg`/`approx_eigenvalues3` when `[ourDimer] check_index = True`.
 
-Sella output: identical to Dimer, plus `n_steps`, `eigenmode_seeded` (0/1) and `hessian_seeded` (0/1), and `nneg`/`eigenvalues` when `[ourSella] check_index = True`. `n_force_calls` is the true evaluation count (`pes.neval`), directly comparable to Dimer's.
+Sella output: identical to Dimer, plus `n_steps`, `eigenmode_seeded` (0/1) and `hessian_seeded` (0/1), and `nneg`/`approx_eigenvalues3` when `[ourSella] check_index = True`. `n_force_calls` is the true evaluation count (`pes.neval`), directly comparable to Dimer's.
 
-DoubleMinimization output: `side` (-1/0/1), `parent_ts_index`, `converged`, `src_index`, full reaction-detection dict (`is_reaction`, `n_formed_bonds`, `n_broken_bonds`, `broken_bonds`, `formed_bonds`, plus `is_ads_reaction` / `n_ads_*` / `ads_*_bonds` for OC inputs), `status` (`converged` / `converged_desorption_skipped` / `not_converged`; TS frame always `converged`), `task_name`, the mode it displaced along on the TS frame (`eigenmodes`/`eigenvalues` if it was an exact, unrefined `eigenmodes[0]`, else `approx_eigenmode` + `approx_curvature` when known), `orig_info`. CSV: 2 lines per job `{job_id},{rank},{side_id},{parent_ts_idx},"{status}"`.
+DoubleMinimization output: `side` (-1/0/1), `parent_ts_index`, `converged`, `src_index`, full reaction-detection dict (`is_reaction`, `n_formed_bonds`, `n_broken_bonds`, `broken_bonds`, `formed_bonds`, plus `is_ads_reaction` / `n_ads_*` / `ads_*_bonds` for OC inputs), `status` (`converged` / `converged_desorption_skipped` / `not_converged`; TS frame always `converged`), `task_name`, the mode it displaced along on the TS frame (`eigenmodes3`/`eigenvalues3` copied from the input if it was an exact, unrefined `eigenmodes3[0]`, else `approx_eigenmode` + `approx_curvature` when known), `orig_info`. CSV: 2 lines per job `{job_id},{rank},{side_id},{parent_ts_idx},"{status}"`.
 
 For method `SinglePoint`:
 ```
@@ -702,7 +714,7 @@ SinglePoint_trajes/collected_sp_rank_*.traj        # only when input_format=traj
 SinglePoint_lmdbs/collected_sp_rank_*.aselmdb      # only when input_format=lmdb
 SinglePoint_debug_zips/structure_rank_*.zip        # only when Calculator is VASP/VaspInteractive
 ```
-SP creates the output directory matching the active `input_format` (plus `_status_csvs/`), and — only when Calculator is VASP/VaspInteractive — a `SinglePoint_debug_zips/` (FAIRChem SP has none). SP output frames carry `src_index`, `status`, `task_name`, `orig_info` (for .traj input via `load_and_sanitize`), plus `converged` (0/1) for VASP. `status` is `converged` for FAIRChem / any true single-point, but for a VASP relaxation (e.g. VTST dimer) it is the real verdict — `converged` / `not_converged` / `error: scf_not_converged`. For LMDB input, each output row mirrors the source row's `key_value_pairs` and `data` (`info` + `traj_path`) verbatim, with `row.energy` / `row.forces` newly populated via `SinglePointCalculator` on the atoms object — i.e. byte-equivalent to a fresh `build_lmdb_parallel.py` run on E/F-bearing trajectories (the only additions to `data['info']` are opted-in `[ourVasp] extra_outputs` such as VTST `approx_eigenmode`/`approx_curvature`, plus a `converged` flag for VASP, and a new `approx_eigenmode` removes the row's stale `eigenmodes`/`eigenvalues`/`hessian`; with none — e.g. all-FAIRChem SP — the row stays byte-equivalent). The `src_index`/`status`/`task_name` bookkeeping is traj-output-only — `ase.db` serializes only the `data=` blob, never `atoms.info`. With `frames_per_job = 3`, the three frames of each triplet are evaluated in one batched FAIRChem forward pass and written contiguously in input order to the same rank shard.
+SP creates the output directory matching the active `input_format` (plus `_status_csvs/`), and — only when Calculator is VASP/VaspInteractive — a `SinglePoint_debug_zips/` (FAIRChem SP has none). SP output frames carry `src_index`, `status`, `task_name`, `orig_info` (for .traj input via `load_and_sanitize`), plus `converged` (0/1) for VASP. `status` is `converged` for FAIRChem / any true single-point, but for a VASP relaxation (e.g. VTST dimer) it is the real verdict — `converged` / `not_converged` / `error: scf_not_converged`. For LMDB input, each output row mirrors the source row's `key_value_pairs` and `data` (`info` + `traj_path`) verbatim, with `row.energy` / `row.forces` newly populated via `SinglePointCalculator` on the atoms object — i.e. byte-equivalent to a fresh `build_lmdb_parallel.py` run on E/F-bearing trajectories (the only additions to `data['info']` are opted-in `[ourVasp] extra_outputs` such as VTST `approx_eigenmode`/`approx_curvature`, plus a `converged` flag for VASP, and a new `approx_eigenmode` removes the row's stale `eigenvalues`/`eigenvalues3`/`eigenmodes3`/`eigenmodes_compressed`/`hessian`; with none — e.g. all-FAIRChem SP — the row stays byte-equivalent). The `src_index`/`status`/`task_name` bookkeeping is traj-output-only — `ase.db` serializes only the `data=` blob, never `atoms.info`. With `frames_per_job = 3`, the three frames of each triplet are evaluated in one batched FAIRChem forward pass and written contiguously in input order to the same rank shard.
 
 ## Execution Modes
 
@@ -747,11 +759,11 @@ tests/
 │   ├── minimization_input.traj  # 68-atom slab+adsorbate
 │   ├── oc_adsorbate_slab.traj   # 131-atom slab+adsorbate
 │   └── oc_neb_pair.traj         # 10-frame NEB, 68 atoms
-├── test_config.py               # ConfigManager, load_*, run_jobs, archive/clean (92, CPU)
+├── test_config.py               # ConfigManager, load_*, run_jobs, archive/clean (94, CPU)
 ├── test_tools.py                # load_and_sanitize, check_reaction, extraction, get_task_name, passes_input_filter, VASP SCF check (57, CPU)
 ├── test_structure_edit.py       # Bulk & OC reaction types, supercell (43, CPU)
 ├── test_kappa_changes.py        # Kappa engine, force-call counting, per-type attempt counts on EMT (16, CPU)
-├── test_sellaopt.py             # Sella config/seeding/accounting/e2e on EMT, Hessian outputs, lowest_mode, initial_hessian (57, CPU)
+├── test_sellaopt.py             # Sella config/seeding/accounting/e2e on EMT, Hessian outputs, lowest_mode, initial_hessian, eigenmode compression (66, CPU)
 ├── test_vasp_io.py              # input generators, MODECAR writer, VTST parser, SinglePoint VASP outputs/status (53, CPU; OMat24/OC20 cases skip without their packages)
 ├── test_sp_resume.py            # SinglePoint VASP resume: banking wall-killed VTST state, seeding POSCAR/MODECAR (23, CPU)
 ├── test_sp_resume_modes.py      # wall-kill states the SinglePoint resume gate must handle (11, CPU)
@@ -761,12 +773,12 @@ tests/
 ├── test_spc_wrap_ordering.py    # SinglePointCalculator vs Atoms.wrap() ordering (4, CPU)
 ├── test_nebopt_integration.py   # Full NEB runs (8, GPU)
 ├── test_dimeropt_integration.py # Dimer runs (7, GPU)
-├── test_geomopt_integration.py  # geomopt + doublegeomopt, DoubleMinimization TS mode (7, GPU)
+├── test_geomopt_integration.py  # geomopt + doublegeomopt (GPU), DoubleMinimization TS mode (CPU) (7, mixed)
 ├── test_init_function.py        # init_function (5, GPU)
 └── test_main_integration.py     # End-to-end pipeline + resume (6, GPU)
 ```
 
-Counts are collected test cases (`pytest --collect-only`, parametrized cases counted separately): 418 in total on 2026-09-30.
+Counts are collected test cases (`pytest --collect-only`, parametrized cases counted separately): 432 in total on 2026-10-01.
 
 Markers: `@pytest.mark.gpu` (CUDA, auto-skipped), `@pytest.mark.flux` (Flux scheduler), `@pytest.mark.slow` (>60s)
 

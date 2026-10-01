@@ -373,11 +373,11 @@ class TestWriteModecar:
         assert (tmp_path / "MODECAR").exists()
 
     def test_exact_eigenmodes_win_over_approx(self, tmp_path):
-        """A SinglePoint compute_eigenmodes pass (eigenmodes[0]) seeds MODECAR
+        """A SinglePoint compute_eigenmodes pass (eigenmodes3[0]) seeds MODECAR
         ahead of a search's approx_eigenmode on the same level."""
         atoms = self._atoms([[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]])
-        exact = np.zeros((2, 3, 3)); exact[0, 1, 2] = 1.0
-        atoms.info["eigenmodes"] = exact
+        exact = np.zeros((3, 3, 3)); exact[0, 1, 2] = 1.0
+        atoms.info["eigenmodes3"] = exact
         write_modecar(_FakeCalc(directory=str(tmp_path)), atoms, str(tmp_path))
         assert np.allclose(np.loadtxt(tmp_path / "MODECAR"), exact[0])
 
@@ -385,7 +385,7 @@ class TestWriteModecar:
         atoms = Atoms("H3", positions=[[0, 0, 0], [1, 0, 0], [2, 0, 0]])
         # the pre-rename key is not read (clean break)
         atoms.info["eigenmode"] = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]]
-        with pytest.warns(UserWarning, match="no 'eigenmodes' or 'approx_eigenmode'"):
+        with pytest.warns(UserWarning, match="no 'eigenmodes3' or 'approx_eigenmode'"):
             write_modecar(_FakeCalc(directory=str(tmp_path)), atoms, str(tmp_path))
         assert not (tmp_path / "MODECAR").exists()
 
@@ -565,21 +565,24 @@ class TestExtraOutputsReachSinglePointLMDB:
         assert np.allclose(np.array(info["approx_eigenmode"]), 0.0)  # stale guess untouched
 
     # An exact spectrum from a Hessian pass at the pre-VASP geometry.
-    _EXACT = {"eigenvalues": [-0.2, 0.5],
-              "eigenmodes": [[[1., 0., 0.], [0., 0., 0.]], [[0., 1., 0.], [0., 0., 0.]]],
+    _EXACT = {"eigenvalues": [-0.2, 0.5, 0.7, 0.9, 1.1, 1.3],
+              "eigenvalues3": [-0.2, 0.5, 0.7],
+              "eigenmodes3": np.eye(6)[:3].reshape(3, 2, 3).tolist(),
+              "eigenmodes_compressed": np.random.RandomState(0).randn(15).tolist(),
               "hessian": np.eye(6).tolist(),
               "src_tag": "INPUT"}
 
     def test_vtst_mode_drops_stale_exact_spectrum(self, tmp_path, monkeypatch):
         # lmdb info is flat: without the drop, lowest_mode would seed the next
-        # pass from the old exact eigenmodes[0] instead of the new VTST mode.
+        # pass from the old exact eigenmodes3[0] instead of the new VTST mode.
         from saddlemill.tools import lowest_mode
         sm_extra = {"approx_eigenmode": np.array([[0., 0., 1.], [1., 0., 0.]]),
                     "approx_curvature": -0.77}
         row, _, _, _ = self._run_sp_lmdb(tmp_path, monkeypatch, sm_extra,
                                          source_info=dict(self._EXACT))
         info = row.data["info"]
-        assert not {"eigenmodes", "eigenvalues", "hessian"} & set(info)
+        assert not {"eigenvalues", "eigenvalues3", "eigenmodes3",
+                    "eigenmodes_compressed", "hessian"} & set(info)
         assert info["src_tag"] == "INPUT"
         mode, curv, exact = lowest_mode(info)
         assert not exact and curv == -0.77
@@ -590,8 +593,11 @@ class TestExtraOutputsReachSinglePointLMDB:
         row, _, _, _ = self._run_sp_lmdb(tmp_path, monkeypatch, {"other": 1},
                                          source_info=dict(self._EXACT))
         info = row.data["info"]
-        assert info["eigenvalues"] == [-0.2, 0.5]
-        assert np.allclose(np.array(info["eigenmodes"]), self._EXACT["eigenmodes"])
+        assert info["eigenvalues3"] == [-0.2, 0.5, 0.7]
+        assert np.allclose(np.array(info["eigenmodes3"]), self._EXACT["eigenmodes3"])
+        # the compressed modes survive the lmdb JSON round trip bit for bit
+        assert (np.array(info["eigenmodes_compressed"]).tobytes()
+                == np.array(self._EXACT["eigenmodes_compressed"]).tobytes())
         assert np.allclose(np.array(info["hessian"]), np.eye(6))
 
 

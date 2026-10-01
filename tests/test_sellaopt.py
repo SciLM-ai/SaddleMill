@@ -312,15 +312,18 @@ class TestSellaoptEndToEnd:
         # A large fmax makes the very first geometry "converged", so the index
         # check runs on a well-defined structure and the test stays fast.
         config = _make_config(steps=5, fmax=50.0, check_index=True)
-        config["ourSella"]["index_nev"] = 2
         atoms = _prepare(_cu_slab())
 
         sellaopt(0, config, atoms, EMT(), consecutive_errors=[0],
                  executorlib_worker_id=0)
 
         frames = list(Trajectory(str(tmp_path / "Sella_trajes" / "collected_ts_rank_0.traj")))
-        assert frames[0].info["status"].startswith("converged")
-        assert "nneg" in frames[0].info
+        info = frames[0].info
+        assert info["status"].startswith("converged")
+        assert "nneg" in info
+        eigs = info["approx_eigenvalues3"]
+        assert len(eigs) == 3 and list(eigs) == sorted(eigs)
+        assert "eigenvalues" not in info
 
     def test_error_is_logged_not_raised(self, tmp_path, monkeypatch):
         """A failing attempt must be caught per-attempt, like the Dimer's."""
@@ -409,9 +412,9 @@ class TestSinglePointHessianConfig:
     def test_defaults_exist(self):
         from saddlemill.config import ConfigManager
         sp = ConfigManager.DEFAULTS["ourSinglePoint"]
-        for k in ("compute_hessian", "compute_eigenmodes", "hessian_nev_store",
-                  "hessian_chunk"):
+        for k in ("compute_hessian", "compute_eigenmodes", "hessian_chunk"):
             assert k in sp, f"[ourSinglePoint] missing {k}"
+        assert "hessian_nev_store" not in sp, "removed: all eigenvalues are stored"
         assert sp["compute_hessian"] is False and sp["compute_eigenmodes"] is False, \
             "both must be off by default"
 
@@ -472,12 +475,12 @@ class TestHessianOutputs:
 
     def test_eigenmodes_key_is_what_dimer_and_sella_consume(self):
         """The reuse path between a Hessian job and the next search job is
-        atoms.info['eigenmodes'][0] via lowest_mode — assert the contract in
+        atoms.info['eigenmodes3'][0] via lowest_mode — assert the contract in
         both directions."""
         import inspect
         from saddlemill import tools, sellaopt, dimeropt
-        assert '"eigenmodes"' in inspect.getsource(tools.hessian_outputs)
-        assert '"eigenmodes"' in inspect.getsource(tools.lowest_mode)
+        assert '"eigenmodes3"' in inspect.getsource(tools.hessian_outputs)
+        assert '"eigenmodes3"' in inspect.getsource(tools.lowest_mode)
         # both searches read through lowest_mode (with orig_info fallback)
         for mod in (sellaopt, dimeropt):
             src = inspect.getsource(mod)
@@ -488,10 +491,10 @@ class TestHessianOutputs:
 class TestLowestMode:
     def test_exact_mode_wins_over_approx(self):
         from saddlemill.tools import lowest_mode
-        exact = np.zeros((2, 3, 3)); exact[0, 0, 0] = 1.0
+        exact = np.zeros((3, 3, 3)); exact[0, 0, 0] = 1.0
         approx = np.zeros((3, 3)); approx[2, 2] = 1.0
         mode, curv, is_exact = lowest_mode({
-            "eigenmodes": exact, "eigenvalues": [-0.4, 0.1],
+            "eigenmodes3": exact, "eigenvalues3": [-0.4, 0.1, 0.2],
             "approx_eigenmode": approx, "approx_curvature": -9.0})
         assert is_exact and curv == pytest.approx(-0.4)
         assert np.allclose(mode, exact[0])
@@ -510,9 +513,11 @@ class TestLowestMode:
         assert mode.shape == (1, 3) and curv is None and not is_exact
 
     @pytest.mark.parametrize("info", [None, {}, {"eigenmode": [[1., 0., 0.]]},
-                                      {"curvature": -0.3}])
+                                      {"curvature": -0.3},
+                                      {"eigenmodes": [[[1., 0., 0.]]], "eigenvalues": [-0.3]}])
     def test_empty_or_legacy_keys_give_nothing(self, info):
-        """Clean break: the pre-rename 'eigenmode'/'curvature' keys are not read."""
+        """Clean break: the pre-rename 'eigenmode'/'curvature' and
+        'eigenmodes'/'eigenvalues' mode keys are not read."""
         from saddlemill.tools import lowest_mode
         assert lowest_mode(info) == (None, None, False)
 
@@ -573,7 +578,7 @@ class TestConstraintProjection:
         a = self._atoms_with_fixed(n=6, fixed=(0, 1))
         out = hessian_outputs(a)
         assert out, "expected a populated dict"
-        mode = np.asarray(out["eigenmodes"][0])
+        mode = np.asarray(out["eigenmodes3"][0])
         assert mode.shape == (6, 3)
         assert np.allclose(mode[[0, 1]], 0.0), "fixed atoms must not move"
         assert np.isclose(np.linalg.norm(mode), 1.0)
@@ -583,7 +588,7 @@ class TestHessianStorageSwitches:
     """compute_hessian keeps the matrix, compute_eigenmodes keeps the spectrum; the
     Hessian is computed once either way. Fed a known Hessian so it runs on CPU."""
 
-    EIGEN_KEYS = {"eigenvalues", "eigenmodes"}
+    EIGEN_KEYS = {"eigenvalues", "eigenvalues3", "eigenmodes3", "eigenmodes_compressed"}
 
     def _atoms(self, n=6, fixed=(0, 1)):
         from ase import Atoms
@@ -636,34 +641,37 @@ class TestHessianStorageSwitches:
     def test_eigenmodes_only_stores_the_projected_spectrum_not_the_matrix(self):
         from saddlemill.tools import hessian_outputs, _project_free
         a, H = self._atoms()
-        out = hessian_outputs(a, nev_store=4, compute_hessian=False, compute_eigenmodes=True)
+        out = hessian_outputs(a, compute_hessian=False, compute_eigenmodes=True)
         assert "hessian" not in out
         assert set(out) == self.EIGEN_KEYS
         ref = np.linalg.eigvalsh(_project_free(H, a))
-        assert np.allclose(out["eigenvalues"], ref[:4])
-        modes = np.asarray(out["eigenmodes"])
-        assert modes.shape == (4, 6, 3)
+        assert np.allclose(out["eigenvalues"], ref), "all 3 * 4 free-DOF eigenvalues"
+        assert out["eigenvalues3"] == out["eigenvalues"][:3]
+        modes = np.asarray(out["eigenmodes3"])
+        assert modes.shape == (3, 6, 3)
         assert np.allclose(modes[:, [0, 1]], 0.0), "fixed atoms must not move in any mode"
         Hp = _project_free(H, a)
-        for j in range(4):  # each stored mode is an eigenvector of the projected Hessian
+        for j in range(3):  # each stored mode is an eigenvector of the projected Hessian
             v = modes[j][2:].ravel()
             assert np.allclose(Hp @ v, ref[j] * v, atol=1e-8)
 
     def test_both_switches_store_both(self):
-        from saddlemill.tools import hessian_outputs
+        """The decompressed modes rebuild the stored Hessian, and eigenmodes3 is
+        their first 3 up to sign."""
+        from saddlemill.tools import hessian_outputs, decompress_eigenmodes
         a, H = self._atoms()
         out = hessian_outputs(a, compute_hessian=True, compute_eigenmodes=True)
         assert set(out) == {"hessian"} | self.EIGEN_KEYS
-
-    def test_negative_nev_store_keeps_every_eigenpair(self):
-        from saddlemill.tools import hessian_outputs
-        a, _ = self._atoms()
-        out = hessian_outputs(a, nev_store=-1, compute_eigenmodes=True)
-        assert len(out["eigenvalues"]) == 12, "3 * 4 free atoms"
-        assert np.asarray(out["eigenmodes"]).shape == (12, 6, 3)
+        modes = decompress_eigenmodes(out["eigenmodes_compressed"], a)
+        M = modes.reshape(len(modes), -1)
+        assert np.allclose(M.T @ np.diag(out["eigenvalues"]) @ M, out["hessian"],
+                           rtol=0, atol=1e-10)
+        sign = np.sign(np.sum(modes[:3] * out["eigenmodes3"], axis=(1, 2)))
+        assert np.allclose(modes[:3] * sign[:, None, None], out["eigenmodes3"],
+                           rtol=0, atol=1e-10)
 
     def test_default_call_is_the_old_eigen_summary(self):
-        """hessian_outputs(atoms) keeps its pre-switch behaviour for existing callers."""
+        """hessian_outputs(atoms) defaults to the eigen summary."""
         from saddlemill.tools import hessian_outputs
         a, _ = self._atoms()
         out = hessian_outputs(a)
@@ -673,6 +681,73 @@ class TestHessianStorageSwitches:
 # --------------------------------------------------------------------------
 # Sella started from a stored exact Hessian ([ourSella] initial_hessian)
 # --------------------------------------------------------------------------
+
+class TestCompressEigenmodes:
+    """All n eigenvectors in n(n-1)/2 numbers, recovered up to each mode's sign."""
+
+    @staticmethod
+    def _round_trip(V):
+        """compress -> decompress on n/3 free atoms; returns columns = modes."""
+        from ase import Atoms
+        from saddlemill.tools import compress_eigenmodes, decompress_eigenmodes
+        n = len(V)
+        return decompress_eigenmodes(compress_eigenmodes(V), Atoms("H" * (n // 3))).reshape(n, n).T
+
+    @staticmethod
+    def _same_up_to_sign(V, W):
+        sign = np.sign(np.sum(V * W, axis=0))
+        return np.all(sign != 0) and np.allclose(W * sign, V, rtol=0, atol=1e-10)
+
+    @pytest.mark.parametrize("n", [3, 6, 30, 150])
+    def test_random_orthogonal_round_trip(self, n):
+        V, _ = np.linalg.qr(np.random.RandomState(n).randn(n, n))
+        assert self._same_up_to_sign(V, self._round_trip(V))
+
+    @pytest.mark.parametrize("perm", [np.arange(9), np.random.RandomState(0).permutation(9)])
+    def test_identity_and_permutation(self, perm):
+        """LAPACK stores tau = 0 where a column needs no reflection."""
+        V = np.eye(9)[:, perm]
+        assert self._same_up_to_sign(V, self._round_trip(V))
+
+    def test_layout(self):
+        """Flat float64 of n(n-1)/2, Householder vectors column by column; the
+        first n-1 numbers alone give mode 1."""
+        from scipy.linalg import qr
+        from saddlemill.tools import compress_eigenmodes
+        n = 12
+        V, _ = np.linalg.qr(np.random.RandomState(1).randn(n, n))
+        c = compress_eigenmodes(V)
+        assert c.dtype == np.float64 and c.shape == (n * (n - 1) // 2,)
+        (a, _), _ = qr(V, mode="raw")
+        assert np.array_equal(c, np.concatenate([a[k + 1:, k] for k in range(n - 1)]))
+        v = np.r_[1.0, c[:n - 1]]
+        mode1 = np.eye(n)[0] - 2 * v / (v @ v)
+        assert self._same_up_to_sign(V[:, :1], mode1[:, None])
+
+    def test_degenerate_translation_modes_stay_orthonormal(self):
+        """Three equal eigenvalues (rigid translations): the decoded set is still
+        orthonormal and rebuilds H."""
+        n = 15
+        q, _ = np.linalg.qr(np.random.RandomState(3).randn(n, n))
+        H = q @ np.diag(np.r_[0.0, 0.0, 0.0, np.linspace(0.5, 3.0, n - 3)]) @ q.T
+        evals, V = np.linalg.eigh(H)
+        W = self._round_trip(V)
+        assert np.allclose(W.T @ W, np.eye(n), rtol=0, atol=1e-10)
+        assert np.allclose(W @ np.diag(evals) @ W.T, H, rtol=0, atol=1e-10)
+
+    def test_real_hessian_with_fixed_atoms(self):
+        """EMT Hessian of the Cu slab: zeros on fixed atoms, free DOF in
+        _project_free order."""
+        from saddlemill.tools import _project_free, compress_eigenmodes, decompress_eigenmodes
+        atoms = _cu_slab()
+        evals, V = np.linalg.eigh(_project_free(_fd_hessian(atoms), atoms))
+        modes = decompress_eigenmodes(compress_eigenmodes(V), atoms)
+        fixed = atoms.constraints[0].index
+        assert modes.shape == (len(V), len(atoms), 3)
+        assert np.allclose(modes[:, fixed], 0.0)
+        free = np.delete(modes, fixed, axis=1).reshape(len(V), -1).T
+        assert self._same_up_to_sign(V, free)
+
 
 def _fd_hessian(atoms, eps=1e-3):
     """Full (3N, 3N) central-difference Hessian with EMT, constraints ignored

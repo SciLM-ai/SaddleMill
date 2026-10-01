@@ -924,7 +924,7 @@ def get_initial_guess_attempts(atoms):
     If the input atoms carry a saddle search's mode
     (atoms.info['orig_info']['approx_eigenmode']), it is preserved in the output
     so that dimeropt can seed the dimer with it instead of a random guess. An
-    exact Hessian mode (orig_info['eigenmodes']) needs no copy: dimeropt and
+    exact Hessian mode (orig_info['eigenmodes3']) needs no copy: dimeropt and
     sellaopt read it from orig_info, and promoting it would carry the input's
     spectrum onto the output frame.
     """

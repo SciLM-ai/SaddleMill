@@ -880,7 +880,45 @@ def _analytic_hessian(atoms, chunk=1):
     return _project_free(H, atoms)
 
 
-def hessian_outputs(atoms, nev_store=8, chunk=1,
+def compress_eigenmodes(V):
+    """All eigenvectors in half-size Householder form, as a flat float64 array.
+
+    ``V`` is (n, n), column k = mode k (as ``np.linalg.eigh`` returns it), rows
+    = the free DOF in ascending atom order (as `_project_free` keeps them).
+    QR of an orthogonal V gives V = QR with R diagonal +-1, so the Householder
+    vectors of Q hold V up to the sign of each column. Stored: the strict lower
+    triangle of those vectors, column by column, n(n-1)/2 numbers; the first
+    n-1 alone give mode 1. `decompress_eigenmodes` inverts it.
+    """
+    from scipy.linalg import qr
+    V = np.asarray(V, dtype=float)
+    (a, _), _ = qr(V, mode="raw")
+    return a.T[np.triu_indices(len(V), 1)]
+
+
+def decompress_eigenmodes(compressed, atoms):
+    """Modes (n, N, 3) from `compress_eigenmodes` output, zero on fixed atoms.
+
+    Mode k is ``[k]``, in the eigenvalue order of the stored ``eigenvalues``;
+    each mode's sign is arbitrary. ``atoms`` supplies N and the fixed atoms.
+    """
+    from scipy.linalg import lapack
+    fixed = set(_fixed_indices(atoms))
+    free = [i for i in range(len(atoms)) if i not in fixed]
+    n = 3 * len(free)
+    A = np.zeros((n, n))
+    A.T[np.triu_indices(n, 1)] = compressed
+    # tau is not stored: a Householder vector v = [1, a] reflects with 2/|v|^2.
+    # Where LAPACK had tau = 0 this flips that column's sign only.
+    tau = 2.0 / (1.0 + (A ** 2).sum(axis=0))
+    tau[-1] = 0.0
+    V = lapack.dorgqr(A, tau)[0]
+    modes = np.zeros((n, len(atoms), 3))
+    modes[:, free] = V.T.reshape(n, len(free), 3)
+    return modes
+
+
+def hessian_outputs(atoms, chunk=1,
                     compute_hessian=False, compute_eigenmodes=True):
     """Exact Hessian results for a structure, as a dict to stamp onto output.
 
@@ -896,11 +934,13 @@ def hessian_outputs(atoms, nev_store=8, chunk=1,
       is what `sellaopt` accepts as an exact starting Hessian
       (``[ourSella] initial_hessian = True``). No diagonalization is done for it.
     * ``compute_eigenmodes`` diagonalizes the constraint-projected Hessian and
-      keeps the spectrum instead of the matrix: ``eigenvalues`` (lowest
-      ``nev_store``, ascending; all when ``nev_store`` < 0) and ``eigenmodes``
-      (the matching eigenvectors, (k, N, 3) in full Cartesian, zero on fixed
-      atoms). ``dimeropt``, ``sellaopt``, ``doublegeomopt`` and the VTST
-      ``modecar`` writer seed from ``eigenmodes[0]`` (see :func:`lowest_mode`),
+      keeps the spectrum instead of the matrix: ``eigenvalues`` (all n = 3*nfree,
+      ascending), ``eigenvalues3`` (the 3 lowest), ``eigenmodes3`` (their
+      eigenvectors, (3, N, 3) in full Cartesian, zero on fixed atoms) and
+      ``eigenmodes_compressed`` (all n eigenvectors, see
+      :func:`compress_eigenmodes`; :func:`decompress_eigenmodes` gives them
+      back). ``dimeropt``, ``sellaopt``, ``doublegeomopt`` and the VTST
+      ``modecar`` writer seed from ``eigenmodes3[0]`` (see :func:`lowest_mode`),
       so a SinglePoint+Hessian pass feeds the next reconvergence the EXACT
       lowest mode with no extra plumbing.
     """
@@ -914,10 +954,10 @@ def hessian_outputs(atoms, nev_store=8, chunk=1,
         return out
 
     evals, evecs = np.linalg.eigh(_project_free(H, atoms))
-    k = len(evals) if (nev_store is None or nev_store < 0) else min(int(nev_store), len(evals))
+    k = min(3, len(evals))
 
-    # Map eigenvectors back to full (N, 3) Cartesian. The projected Hessian is
-    # restricted to free DOF, so constrained atoms take zero displacement.
+    # Map the lowest eigenvectors back to full (N, 3) Cartesian. The projected
+    # Hessian is restricted to free DOF, so constrained atoms take zero displacement.
     fixed = set(_fixed_indices(atoms))
     free = [i for i in range(len(atoms)) if i not in fixed]
     modes = np.zeros((k, len(atoms), 3))
@@ -925,8 +965,10 @@ def hessian_outputs(atoms, nev_store=8, chunk=1,
         modes[j, free] = evecs[:, j].reshape(len(free), 3)
 
     out.update({
-        "eigenvalues": [float(x) for x in evals[:k]],
-        "eigenmodes": modes,
+        "eigenvalues": [float(x) for x in evals],
+        "eigenvalues3": [float(x) for x in evals[:3]],
+        "eigenmodes3": modes,
+        "eigenmodes_compressed": compress_eigenmodes(evecs),
     })
     return out
 
@@ -934,16 +976,16 @@ def hessian_outputs(atoms, nev_store=8, chunk=1,
 def lowest_mode(info):
     """Lowest mode stored in ONE ``.info`` level, as ``(mode, curvature, exact)``.
 
-    The exact Hessian mode (``eigenmodes[0]`` / ``eigenvalues[0]``, written by a
+    The exact Hessian mode (``eigenmodes3[0]`` / ``eigenvalues3[0]``, written by a
     SinglePoint ``compute_eigenmodes`` pass) wins over a saddle search's
     ``approx_eigenmode`` / ``approx_curvature``. ``exact`` says which one was
     found. Returns ``(None, None, False)`` when the level carries neither.
     Callers pick the level (top level, then ``orig_info``) per the .info rule.
     """
     info = info or {}
-    modes = info.get("eigenmodes")
+    modes = info.get("eigenmodes3")
     if modes is not None and len(modes):
-        evals = info.get("eigenvalues")
+        evals = info.get("eigenvalues3")
         curv = float(evals[0]) if evals is not None and len(evals) else None
         return np.array(modes[0]), curv, True
     mode = info.get("approx_eigenmode")
@@ -960,7 +1002,7 @@ def hessian_request(sp):
             bool(sp.get("compute_eigenmodes", False)))
 
 
-def hessian_index(atoms, nev=4, eps=2e-3, tol=1e-2, maxiter=300, analytic=True):
+def hessian_index(atoms, nev=3, eps=2e-3, tol=1e-2, maxiter=300, analytic=True):
     """Lowest *nev* Hessian eigenvalues by finite-difference Lanczos.
 
     Returns ``(eigenvalues, n_negative)``. A genuine first-order saddle has

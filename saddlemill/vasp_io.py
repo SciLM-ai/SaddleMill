@@ -32,7 +32,7 @@ extra_input_files``): callables ``writer(calc, atoms, directory) -> None`` that
 drop additional files into the VASP working directory *after* ASE has written
 INCAR/POSCAR/etc. (so ``calc.sort`` and the directory exist) and *before* VASP
 runs. The motivating case is ``modecar`` — a VTST MODECAR built from the
-frame's stored lowest mode (``eigenmodes[0]`` or ``approx_eigenmode``, see
+frame's stored lowest mode (``eigenmodes3[0]`` or ``approx_eigenmode``, see
 ``tools.lowest_mode``), reordered to POSCAR order via ``calc.sort``. Same
 selection grammar as ``input_generator`` (built-in name, ``module:func``,
 ``file.py:func``), and a space-separated list runs several writers in order.
@@ -421,7 +421,7 @@ def load_input_generator(spec):
 def write_modecar(calc, atoms, directory):
     """Write a VTST ``MODECAR`` (initial dimer mode) from the frame's lowest mode.
 
-    The mode (``eigenmodes[0]`` from a SinglePoint Hessian pass, else a saddle
+    The mode (``eigenmodes3[0]`` from a SinglePoint Hessian pass, else a saddle
     search's ``approx_eigenmode``; atoms order, with the usual ``orig_info``
     fallback) is reshaped to ``(natoms, 3)``, reordered to POSCAR order via
     ``calc.sort``, normalized, and written one ``nx ny nz`` line per atom. No-op
@@ -434,7 +434,7 @@ def write_modecar(calc, atoms, directory):
         eig = lowest_mode(atoms.info.get("orig_info", {}))[0]
     if eig is None:
         warnings.warn(
-            "extra_input_files=modecar but atoms.info has no 'eigenmodes' or "
+            "extra_input_files=modecar but atoms.info has no 'eigenmodes3' or "
             "'approx_eigenmode'; skipping MODECAR (VTST will use its default "
             "initial mode).")
         return
