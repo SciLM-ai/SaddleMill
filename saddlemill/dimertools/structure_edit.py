@@ -2,6 +2,8 @@ import os
 import warnings
 import numpy as np
 import random
+from contextvars import ContextVar
+from contextlib import contextmanager
 from ase import Atom
 from ase.constraints import FixAtoms
 from ase.neighborlist import NeighborList, natural_cutoffs, neighbor_list, mic
@@ -18,6 +20,77 @@ RING_DEFAULT_MODE = "arc"
 RING_DEFAULT_FRAC = 0.2
 RING_DEFAULT_NBR_MULT = 1.20
 RING_DEFAULT_MAX_CYCLES = 20000
+
+
+# ``attempt_keyed_v1`` keeps the public generator signatures intact while
+# giving every stochastic operation access to the logical attempt currently
+# being materialized. ContextVars are process/task-local and are reset around
+# each reaction-type generator call. Legacy mode leaves these unset and uses
+# the historical module-global Python/NumPy streams verbatim.
+_RNG_FACTORY = ContextVar("saddlemill_structure_rng_factory", default=None)
+_RNG_ATTEMPT_OFFSET = ContextVar("saddlemill_rng_attempt_offset", default=0)
+_RNG_REACTION_TYPE = ContextVar("saddlemill_rng_reaction_type", default="unknown")
+_RNG_CURRENT_ATTEMPT = ContextVar("saddlemill_rng_current_attempt", default=None)
+
+
+@contextmanager
+def _generator_rng_scope(factory, attempt_offset, reaction_type):
+    tok_f = _RNG_FACTORY.set(factory)
+    tok_o = _RNG_ATTEMPT_OFFSET.set(int(attempt_offset))
+    tok_r = _RNG_REACTION_TYPE.set(str(reaction_type))
+    tok_a = _RNG_CURRENT_ATTEMPT.set(None)
+    try:
+        yield
+    finally:
+        _RNG_CURRENT_ATTEMPT.reset(tok_a)
+        _RNG_REACTION_TYPE.reset(tok_r)
+        _RNG_ATTEMPT_OFFSET.reset(tok_o)
+        _RNG_FACTORY.reset(tok_f)
+
+
+def _activate_attempt_rng(local_attempt_index):
+    factory = _RNG_FACTORY.get()
+    if factory is None:
+        _RNG_CURRENT_ATTEMPT.set(None)
+        return None
+    rng = factory.for_attempt(
+        int(_RNG_ATTEMPT_OFFSET.get()) + int(local_attempt_index),
+        str(_RNG_REACTION_TYPE.get()),
+    )
+    _RNG_CURRENT_ATTEMPT.set(rng)
+    return rng
+
+
+def _py_rng(substream):
+    rng = _RNG_CURRENT_ATTEMPT.get()
+    return random if rng is None else rng.python(substream)
+
+
+def _np_rng(substream):
+    rng = _RNG_CURRENT_ATTEMPT.get()
+    return None if rng is None else rng.numpy(substream)
+
+
+def _np_standard_normal(shape, substream):
+    rng = _np_rng(substream)
+    if rng is None:
+        return np.random.standard_normal(shape)
+    return rng.standard_normal(shape)
+
+
+def _np_choice(a, *, substream, p=None):
+    rng = _np_rng(substream)
+    if rng is None:
+        return np.random.choice(a, p=p)
+    return rng.choice(a, p=p)
+
+
+def _group_py_rng(group_name, substream):
+    factory = _RNG_FACTORY.get()
+    if factory is None:
+        return random
+    group = factory.for_group(str(_RNG_REACTION_TYPE.get()), str(group_name))
+    return group.python(substream)
 
 
 def _is_gauss_slot(g, normal_attempts_per_gaussian):
@@ -279,7 +352,7 @@ def _safe_normalize(vec):
     """Normalize a vector, returning a random unit vector if norm is near zero."""
     norm = np.linalg.norm(vec)
     if norm < 1e-12:
-        vec = np.random.randn(3)
+        vec = _np_standard_normal(3, "random_direction_fallback")
         norm = np.linalg.norm(vec)
     return vec / norm
 
@@ -302,7 +375,7 @@ def _nearest_site(site_a, other_sites, cell):
 def _shuffled_site_indices(n_sites, n_attempts):
     """Return n_attempts site indices cycling through a shuffled list."""
     indices = list(range(n_sites))
-    random.shuffle(indices)
+    _group_py_rng("site_assignment", "candidate_site_assignment").shuffle(indices)
     return [indices[i % n_sites] for i in range(n_attempts)]
 
 
@@ -396,16 +469,72 @@ def _displacement_atom_mask(disp_dict, natoms, center_idx=None):
 
 
 def _concentrate_params(config_dict):
-    """(prob, power, std, max_disp, envelope) for power-law-concentrated swaps.
-    concentrate_prob=0 (default) disables the feature -- no behavior change."""
+    """Return parameters for size-intensive power-law concentration.
+
+    The concentrated displacement separates *shape* from *peak amplitude*:
+
+      1. iid standard-normal 3D vectors define random directions/magnitudes;
+      2. optional spatial-envelope weighting is applied;
+      3. atomic magnitudes are raised to ``concentrate_power``;
+      4. the resulting vector is normalized so its largest atomic displacement is 1;
+      5. that unit-peak shape is multiplied by an independent lognormal peak
+         amplitude with configured median and log-space standard deviation.
+
+    Because the final peak amplitude is drawn independently of the eligible atom
+    count, the strongest atomic kick is size-intensive even when the number of
+    eligible atoms varies substantially.
+
+    ``concentrate_std`` and ``concentrate_max_disp`` are legacy normalization
+    controls. They are intentionally rejected whenever concentration is enabled
+    so an old config cannot silently acquire new scientific meaning.
+    """
     if config_dict is None:
-        return (0.0, 1.5, 0.2, 0.0, 0.0)
+        return (0.0, 1.5, 0.5, 0.25, 0.0)
+
     d = config_dict.get("ourDimer", {}) or {}
-    return (float(d.get("concentrate_prob", 0.0)),
-            float(d.get("concentrate_power", 1.5)),
-            float(d.get("concentrate_std", 0.2)),
-            float(d.get("concentrate_max_disp", 0.0)),
-            float(d.get("concentrate_envelope", 0.0)))
+    prob = float(d.get("concentrate_prob", 0.0))
+    power = float(d.get("concentrate_power", 1.5))
+    peak_median = float(d.get("concentrate_peak_median", 0.5))
+    peak_log_std = float(d.get("concentrate_peak_log_std", 0.25))
+    envelope = float(d.get("concentrate_envelope", 0.0))
+
+    if prob < 0.0 or prob > 1.0:
+        raise ValueError(
+            f"[ourDimer] concentrate_prob must be in [0, 1]; got {prob}"
+        )
+    if power <= 0.0:
+        raise ValueError(
+            f"[ourDimer] concentrate_power must be > 0; got {power}"
+        )
+    if peak_median <= 0.0:
+        raise ValueError(
+            "[ourDimer] concentrate_peak_median must be > 0 A; "
+            f"got {peak_median}"
+        )
+    if peak_log_std < 0.0:
+        raise ValueError(
+            "[ourDimer] concentrate_peak_log_std must be >= 0; "
+            f"got {peak_log_std}"
+        )
+    if envelope < 0.0:
+        raise ValueError(
+            f"[ourDimer] concentrate_envelope must be >= 0 A; got {envelope}"
+        )
+
+    if prob > 0.0:
+        legacy = []
+        for key in ("concentrate_std", "concentrate_max_disp"):
+            value = d.get(key, None)
+            if value not in (None, "", "None", "none"):
+                legacy.append(f"{key}={value!r}")
+        if legacy:
+            raise ValueError(
+                "Legacy concentration normalization is no longer accepted when "
+                "concentrate_prob > 0: " + ", ".join(legacy) + ". Use "
+                "concentrate_peak_median and concentrate_peak_log_std instead."
+            )
+
+    return prob, power, peak_median, peak_log_std, envelope
 
 
 def _displacement_radius(config_dict, default=3.0):
@@ -429,64 +558,88 @@ def _atoms_within_radius(atoms, center_idx, radius):
     return np.where(np.linalg.norm(deltas, axis=1) <= radius)[0]
 
 
-def _power_law_vector(natoms, eligible_indices, power, std, max_disp=0.0,
-                      envelope=0.0, atoms=None, center_idx=None):
-    """Concentrated random displacement: iid Gaussian on the eligible atoms,
-    each atom's magnitude raised to `power` (ratios sharpen), then renormalized.
+def _power_law_vector(natoms, eligible_indices, power, peak_median=0.5,
+                      peak_log_std=0.25, envelope=0.0, atoms=None,
+                      center_idx=None):
+    """Return a size-intensive power-law-concentrated random displacement.
 
-    Normalization, pick one:
-      max_disp <= 0  legacy: total norm = std*sqrt(3*n_eligible), the same total
-                     an iid Gaussian of this std would inject, just redistributed.
-                     power=1 == plain. Size-EXTENSIVE: the largest single-atom
-                     displacement grows like n_eligible**0.25, so one std means a
-                     different kick size on lemat bulk vs an OC22 slab.
-      max_disp  > 0  largest single-atom displacement = max_disp exactly. Size-
-                     intensive; `std` is unused on this path.
+    A standard-normal vector is generated on each eligible atom.  Optional
+    spatial-envelope weighting is applied first, then each atom's 3D magnitude
+    is raised to ``power`` while preserving its direction.  The resulting shape
+    is normalized to unit *maximum atomic displacement*.
 
-    envelope > 0 weights each eligible atom by exp(-r^2/(2*envelope^2)) about
-    center_idx before the power is applied, so the surviving displacement is a
-    contiguous cluster rather than atoms scattered through the cell. Ignored
-    unless both `atoms` and `center_idx` are supplied."""
+    The final peak amplitude is sampled independently as
+
+        A = peak_median * exp(peak_log_std * Z),  Z ~ Normal(0, 1).
+
+    Therefore the maximum atomic displacement is exactly ``A`` for every
+    realization and its distribution does not depend on ``n_eligible``.
+    ``peak_median`` is the exact median of that maximum-displacement
+    distribution.  ``peak_log_std`` controls multiplicative spread; 0 gives a
+    fixed peak equal to ``peak_median``.
+
+    ``power=1`` preserves the raw Gaussian relative magnitudes/directions before
+    unit-peak normalization.  It is not an ordinary iid Gaussian displacement
+    after the independent amplitude normalization.
+
+    ``envelope > 0`` weights eligible atoms by
+    exp(-r^2/(2*envelope^2)) about ``center_idx`` before the power transform.
+    """
     d = np.zeros((natoms, 3))
     idx = np.asarray(sorted(set(int(i) for i in eligible_indices)), dtype=int)
     if len(idx) == 0:
         return d
-    d[idx] = np.random.standard_normal((len(idx), 3))
+
+    d[idx] = _np_standard_normal((len(idx), 3), "concentrated_shape")
     if envelope > 0.0 and atoms is not None and center_idx is not None:
         deltas = mic(atoms.positions[idx] - atoms.positions[int(center_idx)],
                      atoms.get_cell())
         w = np.exp(-np.sum(deltas ** 2, axis=1) / (2.0 * envelope ** 2))
         d[idx] *= w[:, None]
+
     mag = np.linalg.norm(d[idx], axis=1, keepdims=True)
     d[idx] = np.where(mag > 1e-12, d[idx] * mag ** (power - 1), 0.0)
-    if max_disp > 0.0:
-        peak = np.linalg.norm(d[idx], axis=1).max()
-        if peak > 1e-12:
-            d *= max_disp / peak
-    else:
-        total = np.linalg.norm(d)
-        if total > 1e-12:
-            d *= (std * np.sqrt(3 * len(idx))) / total
+
+    shape_peak = np.linalg.norm(d[idx], axis=1).max()
+    if shape_peak <= 1e-12:
+        return d
+
+    peak_amplitude = float(
+        peak_median * np.exp(peak_log_std * _np_standard_normal((), "concentrated_peak"))
+    )
+    if not np.isfinite(peak_amplitude) or peak_amplitude <= 0.0:
+        raise FloatingPointError(
+            "Generated non-finite/non-positive concentrated peak amplitude: "
+            f"{peak_amplitude!r}"
+        )
+
+    d *= peak_amplitude / shape_peak
     return d
 
 
 def _maybe_concentrate(disp_dict, eligible_indices, natoms, config_dict,
                        atoms=None, center_idx=None):
-    """With probability concentrate_prob, replace an ASE Gaussian dict with an
-    explicit power-law-concentrated vector. Returns (dict, was_concentrated).
+    """With probability concentrate_prob, replace an ASE Gaussian dict with a
+    size-intensive power-law vector with an independent lognormal peak amplitude.
+    Returns (dict, was_concentrated).
 
     `atoms`/`center_idx` are only consulted when concentrate_envelope > 0. If no
     center is given, a random eligible atom becomes the envelope center."""
-    q, power, std, max_disp, envelope = _concentrate_params(config_dict)
-    if q <= 0.0 or random.random() >= q:
+    q, power, peak_median, peak_log_std, envelope = _concentrate_params(config_dict)
+    if q <= 0.0 or _py_rng("concentrated_trigger").random() >= q:
         return disp_dict, False
     if envelope > 0.0 and atoms is not None and center_idx is None:
         pool = [int(i) for i in eligible_indices]
         if pool:
-            center_idx = random.choice(pool)
-    vec = _power_law_vector(natoms, eligible_indices, power, std,
-                            max_disp=max_disp, envelope=envelope,
-                            atoms=atoms, center_idx=center_idx)
+            center_idx = _py_rng("concentrated_center").choice(pool)
+    vec = _power_law_vector(
+        natoms, eligible_indices, power,
+        peak_median=peak_median,
+        peak_log_std=peak_log_std,
+        envelope=envelope,
+        atoms=atoms,
+        center_idx=center_idx,
+    )
     return {"displacement_vector": vec, "method": "vector"}, True
 
 
@@ -571,7 +724,7 @@ _HOP_INSERT_WEIGHTS /= _HOP_INSERT_WEIGHTS.sum()
 
 def _sample_hop_insert_element():
     """Sample a common small interstitial element weighted by inverse covalent radius."""
-    idx = np.random.choice(len(_HOP_INSERT_ELEMENTS), p=_HOP_INSERT_WEIGHTS)
+    idx = _np_choice(len(_HOP_INSERT_ELEMENTS), p=_HOP_INSERT_WEIGHTS, substream="randomized_element_selection")
     return _HOP_INSERT_ELEMENTS[idx]
 
 
@@ -597,7 +750,7 @@ def _sample_kickout_insert_element(atoms, sigma=0.2):
     if weights.sum() < 1e-12:
         weights = np.ones_like(weights)
     weights /= weights.sum()
-    idx = np.random.choice(len(_KICKOUT_INSERT_POOL_Z), p=weights)
+    idx = _np_choice(len(_KICKOUT_INSERT_POOL_Z), p=weights, substream="randomized_element_selection")
     return _KICKOUT_INSERT_POOL_Z[idx]
 
 
@@ -648,24 +801,25 @@ def get_vacancy_attempts(atoms, config_dict, num_attempts):
             f"vacancy: only {len(atoms)} distinct vacancies exist but "
             f"{num_attempts} attempts were requested; padding the remainder."
         )
-    remove_indices = random.sample(range(len(atoms)), n_real)
+    remove_indices = _group_py_rng("vacancy_assignment", "randomized_atom_assignment").sample(range(len(atoms)), n_real)
 
     images = []
     displacement_dicts = []
     selected_indices = []
 
     for attempt, rm_idx in enumerate(remove_indices):
+        _activate_attempt_rng(attempt)
         vacancy_pos = atoms.positions[rm_idx].copy()
 
         nn_indices = list(j_idx[i_idx == rm_idx])
         if len(nn_indices) == 0:
             nn_indices = [x for x in range(len(atoms)) if x != rm_idx]
 
-        mechanism = random.randint(0, 2)
+        mechanism = _py_rng("candidate_mechanism_selection").randint(0, 2)
 
         if mechanism == 0:
             image, disp, idx = _vacancy_nn_hop(
-                atoms, rm_idx, random.choice(nn_indices), cell, config_dict, attempt)
+                atoms, rm_idx, _py_rng("randomized_atom_selection").choice(nn_indices), cell, config_dict, attempt)
             images.append(image)
             displacement_dicts.append(disp)
             selected_indices.append(idx)
@@ -682,14 +836,14 @@ def get_vacancy_attempts(atoms, config_dict, num_attempts):
             if len(nnn_pairs) == 0:
                 # Fallback to NN hop when no NNN exists (tiny cells, etc.)
                 image, disp, idx = _vacancy_nn_hop(
-                    atoms, rm_idx, random.choice(nn_indices), cell,
+                    atoms, rm_idx, _py_rng("randomized_atom_selection").choice(nn_indices), cell,
                     config_dict, attempt)
                 images.append(image)
                 displacement_dicts.append(disp)
                 selected_indices.append(idx)
                 continue
 
-            chosen_nnn, _ = random.choice(nnn_pairs)
+            chosen_nnn, _ = _py_rng("randomized_atom_selection").choice(nnn_pairs)
             nnn_pos = atoms.positions[chosen_nnn].copy()
 
             atoms_new = atoms.copy()
@@ -709,7 +863,7 @@ def get_vacancy_attempts(atoms, config_dict, num_attempts):
 
         else:  # mechanism == 2
             # Concerted 2-atom chain: NN->vacancy AND NNN->NN simultaneously.
-            chosen_nn = random.choice(nn_indices)
+            chosen_nn = _py_rng("randomized_atom_selection").choice(nn_indices)
             nn_pos = atoms.positions[chosen_nn].copy()
 
             nn_set = set(nn_indices)
@@ -724,7 +878,7 @@ def get_vacancy_attempts(atoms, config_dict, num_attempts):
             disp_vector[new_nn_idx] = 0.5 * mic(vacancy_pos - nn_pos, cell)
 
             if len(nnn_candidates) > 0:
-                chosen_nnn = random.choice(nnn_candidates)
+                chosen_nnn = _py_rng("randomized_atom_selection").choice(nnn_candidates)
                 nnn_pos = atoms.positions[chosen_nnn].copy()
                 new_nnn_idx = chosen_nnn if chosen_nnn < rm_idx else chosen_nnn - 1
                 disp_vector[new_nnn_idx] = 0.5 * mic(nn_pos - nnn_pos, cell)
@@ -788,6 +942,7 @@ def get_hop_reuse_attempts(atoms, num_attempts, config_dict=None):
 
     for i, ptr, use_gauss in _ranked_slots(num_attempts, n_valid, config_dict,
                                            "hop_reuse"):
+        _activate_attempt_rng(i)
         atoms_new = atoms.copy()
 
         if use_gauss:
@@ -795,7 +950,7 @@ def get_hop_reuse_attempts(atoms, num_attempts, config_dict=None):
             if n_valid > 0:
                 center_idx = scored_pairs[ptr % n_valid][1]
             else:
-                center_idx = random.randrange(len(atoms))
+                center_idx = _py_rng("randomized_atom_selection").randrange(len(atoms))
             mask, eligible = _indices_to_mask(len(atoms_new), [center_idx])
             disp, suffix = _gauss_or_concentrate(
                 atoms_new, {"mask": mask}, eligible, config_dict,
@@ -841,6 +996,7 @@ def get_hop_insert_attempts(atoms, num_attempts, config_dict=None):
     selected_indices = []
 
     for attempt in range(num_attempts):
+        _activate_attempt_rng(attempt)
         element_z = _sample_hop_insert_element()
 
         site_a_idx = site_idx_list[attempt]
@@ -924,6 +1080,7 @@ def get_kickout_reuse_attempts(atoms, num_attempts, config_dict=None):
     images, displacement_dicts, selected_indices = [], [], []
     for i, ptr, use_gauss in _ranked_slots(num_attempts, n_valid, config_dict,
                                            "kickout_reuse"):
+        _activate_attempt_rng(i)
         atoms_new = atoms.copy()
         if use_gauss:
             if n_valid > 0:
@@ -932,7 +1089,7 @@ def get_kickout_reuse_attempts(atoms, num_attempts, config_dict=None):
                 center_idx = kicker_idx
                 eligible = [kicker_idx, kicked_idx]
             else:
-                center_idx = random.randrange(len(atoms))
+                center_idx = _py_rng("randomized_atom_selection").randrange(len(atoms))
                 eligible = [center_idx]
             mask, eligible = _indices_to_mask(len(atoms_new), eligible)
             disp, suffix = _gauss_or_concentrate(
@@ -1020,6 +1177,7 @@ def get_displace_kickout_reuse_attempts(atoms, num_attempts, config_dict=None):
     images, displacement_dicts, selected_indices = [], [], []
     for i, ptr, use_gauss in _ranked_slots(num_attempts, n_valid, config_dict,
                                            "displace_kickout_reuse"):
+        _activate_attempt_rng(i)
         atoms_new = atoms.copy()
         if use_gauss:
             if n_valid > 0:
@@ -1028,7 +1186,7 @@ def get_displace_kickout_reuse_attempts(atoms, num_attempts, config_dict=None):
                 center_idx = kicker_idx
                 eligible = [kicker_idx, kicked_idx]
             else:
-                center_idx = random.randrange(n)
+                center_idx = _py_rng("randomized_atom_selection").randrange(n)
                 eligible = [center_idx]
             mask, eligible = _indices_to_mask(len(atoms_new), eligible)
             disp, suffix = _gauss_or_concentrate(
@@ -1087,6 +1245,7 @@ def get_kickout_insert_attempts(atoms, num_attempts, config_dict=None):
     selected_indices = []
 
     for attempt in range(num_attempts):
+        _activate_attempt_rng(attempt)
         element_z = _sample_kickout_insert_element(atoms)
 
         site_a_idx = site_idx_list[attempt]
@@ -1347,7 +1506,7 @@ def _ring_displacement(atoms, ring, mode, frac):
             if abs(float(dhat @ ref)) > 0.9:
                 ref = np.array([0.0, 1.0, 0.0])
             perp = (_safe_normalize(np.cross(dhat, ref)) * 0.15
-                    * np.linalg.norm(delta) * random.choice([-1, 1]))
+                    * np.linalg.norm(delta) * _py_rng("random_direction_sign").choice([-1, 1]))
             disp[ring[0]] = 0.5 * delta + perp
             disp[ring[1]] = -0.5 * delta - perp
         else:
@@ -1406,6 +1565,7 @@ def get_ring_attempts(atoms, config_dict, num_attempts):
     images, displacement_dicts, selected_indices = [], [], []
     for i, ptr, use_gauss in _ranked_slots(num_attempts, n_valid, config_dict,
                                            "ring"):
+        _activate_attempt_rng(i)
         ring = ranked_rings[ptr % n_valid]
         atoms_new = atoms.copy()
         atoms_new.info['ring_size'] = len(ring)
@@ -1465,10 +1625,10 @@ def _get_oc_neighbor_mask(atoms, adsorbate_indices):
 def _sample_adsorbate_atoms(adsorbate_indices, num_needed):
     """Sample num_needed adsorbate atom indices, cycling if needed."""
     if len(adsorbate_indices) >= num_needed:
-        return random.sample(list(adsorbate_indices), num_needed)
+        return _py_rng("randomized_atom_selection").sample(list(adsorbate_indices), num_needed)
     chosen = list(adsorbate_indices) * (num_needed // len(adsorbate_indices))
     remainder = num_needed % len(adsorbate_indices)
-    chosen.extend(random.sample(list(adsorbate_indices), remainder))
+    chosen.extend(_py_rng("randomized_atom_selection").sample(list(adsorbate_indices), remainder))
     return chosen
 
 
@@ -1487,7 +1647,8 @@ def get_adsorbate_attempts(atoms, config_dict, num_attempts):
     eligible = [int(i) for i in adsorbate_indices]
 
     images, displacement_dicts, selected_indices = [], [], []
-    for _ in range(num_attempts):
+    for attempt in range(num_attempts):
+        _activate_attempt_rng(attempt)
         atoms_new = atoms.copy()
         disp, conc = _maybe_concentrate({"mask": mask}, eligible, len(atoms_new),
                                         config_dict, atoms_new)
@@ -1511,7 +1672,8 @@ def get_adsorbate_surface_attempts(atoms, config_dict, num_attempts):
     mask, eligible = _indices_to_mask(len(atoms), eligible)
 
     images, displacement_dicts, selected_indices = [], [], []
-    for _ in range(num_attempts):
+    for attempt in range(num_attempts):
+        _activate_attempt_rng(attempt)
         atoms_new = atoms.copy()
         disp, conc = _maybe_concentrate({"mask": mask}, eligible, len(atoms_new),
                                         config_dict, atoms_new)
@@ -1616,11 +1778,12 @@ def get_diffusion_attempts(atoms, config_dict, num_attempts):
         return [None] * num_attempts, [None] * num_attempts, [-1] * num_attempts
 
     images, displacement_dicts, selected_indices = [], [], []
-    for _ in range(num_attempts):
+    for attempt in range(num_attempts):
+        _activate_attempt_rng(attempt)
         atoms_new = atoms.copy()
         atoms_new.info['reaction_type'] = 'diffusion'
 
-        direction = np.random.randn(3)
+        direction = _np_standard_normal(3, "random_direction")
         direction /= np.linalg.norm(direction)
 
         disp = np.zeros((len(atoms), 3))
@@ -1642,7 +1805,8 @@ def get_all_movable_attempts(atoms, config_dict, num_attempts):
     eligible = list(movable)
 
     images, displacement_dicts, selected_indices = [], [], []
-    for _ in range(num_attempts):
+    for attempt in range(num_attempts):
+        _activate_attempt_rng(attempt)
         atoms_new = atoms.copy()
         disp, conc = _maybe_concentrate({"mask": mask}, eligible, len(atoms_new),
                                         config_dict, atoms_new)
@@ -1659,7 +1823,8 @@ def get_all_atoms_attempts(atoms, config_dict, num_attempts):
     eligible = list(range(len(atoms)))
     mask = [True] * len(atoms)
     images, displacement_dicts, selected_indices = [], [], []
-    for _ in range(num_attempts):
+    for attempt in range(num_attempts):
+        _activate_attempt_rng(attempt)
         atoms_new = atoms.copy()
         disp, conc = _maybe_concentrate({"mask": mask}, eligible, len(atoms_new),
                                         config_dict, atoms_new)
@@ -1684,9 +1849,10 @@ def get_random_bubble_attempts(atoms, config_dict, num_attempts):
     movable_list = sorted(movable)
     images, displacement_dicts, selected_indices = [], [], []
 
-    for _ in range(num_attempts):
+    for attempt in range(num_attempts):
+        _activate_attempt_rng(attempt)
         atoms_new = atoms.copy()
-        center_idx = random.choice(movable_list)
+        center_idx = _py_rng("randomized_atom_selection").choice(movable_list)
 
         near_indices = _atoms_within_radius(atoms_new, center_idx, radius)
         eligible = [int(i) for i in near_indices if int(i) in movable]
@@ -1724,11 +1890,12 @@ def get_rotation_attempts(atoms, config_dict, num_attempts):
     com = np.average(ads_positions, weights=ads_masses, axis=0)
 
     images, displacement_dicts, selected_indices = [], [], []
-    for _ in range(num_attempts):
+    for attempt in range(num_attempts):
+        _activate_attempt_rng(attempt)
         atoms_new = atoms.copy()
         atoms_new.info['reaction_type'] = 'rotation'
 
-        axis = np.random.randn(3)
+        axis = _np_standard_normal(3, "random_direction")
         axis /= np.linalg.norm(axis)
         angle = 0.05  # radians
 
@@ -1746,7 +1913,8 @@ def get_rotation_attempts(atoms, config_dict, num_attempts):
 def get_custom_attempts(atoms, config_dict, num_attempts):
     """No overrides -- displacement fully controlled by [DimerControl] settings."""
     images, displacement_dicts, selected_indices = [], [], []
-    for _ in range(num_attempts):
+    for attempt in range(num_attempts):
+        _activate_attempt_rng(attempt)
         atoms_new = atoms.copy()
         atoms_new.info['reaction_type'] = 'custom'
         images.append(atoms_new)
@@ -1777,7 +1945,7 @@ def get_initial_guess_attempts(atoms):
             and isinstance(orig, dict) and 'eigenmode' in orig):
         atoms_new.info['eigenmode'] = np.array(orig['eigenmode'])
 
-    disp_vector = np.random.randn(len(atoms_new), 3) * 1e-10
+    disp_vector = _np_standard_normal((len(atoms_new), 3), "candidate_displacement") * 1e-10
     return [atoms_new], [{"displacement_vector": disp_vector, "method": "vector"}], [-1]
 
 
@@ -1823,9 +1991,12 @@ def _parse_reaction_types(reaction_types):
     return []
 
 
-def get_attempts(atoms, config_dict):
+def get_attempts(atoms, config_dict, rng_factory=None):
 
     atoms = atoms.copy()
+    if rng_factory is None:
+        from saddlemill.rng_keyed import build_structure_rng_factory
+        rng_factory = build_structure_rng_factory(config_dict, atoms)
 
     # --- Handle initial_guess early (no supercell, works for both bulk and oc) ---
     reaction_types = config_dict["ourDimer"].get("reaction_types")
@@ -1849,7 +2020,14 @@ def get_attempts(atoms, config_dict):
             indices = np.where(tags == 0)[0]
             atoms.set_constraint(FixAtoms(indices=indices))
 
-        return get_initial_guess_attempts(atoms)
+        with _generator_rng_scope(rng_factory, 0, "initial_guess"):
+            _activate_attempt_rng(0)
+            result = get_initial_guess_attempts(atoms)
+        if rng_factory is not None and result[0] and result[0][0] is not None:
+            result[0][0].info["rng_provenance"] = rng_factory.provenance_for_attempt(
+                0, "initial_guess"
+            )
+        return result
 
     # Centralized supercell expansion (controlled by config, default True).
     # An OC slab carries exactly one adsorbate; expanding it would duplicate
@@ -1883,16 +2061,25 @@ def get_attempts(atoms, config_dict):
         num_per_type = config_dict["ourDimer"].get("num_attempts_per_type", 1)
         counts = _resolve_attempts_per_type(num_per_type, reaction_types_list)
 
+        attempt_offset = 0
         for rtype, n_attempts in zip(reaction_types_list, counts):
             if rtype not in _BULK_REACTION_TYPE_DISPATCH:
                 supported = ", ".join(_BULK_REACTION_TYPE_DISPATCH.keys())
                 raise ValueError(f"Unknown bulk reaction type: '{rtype}'. "
                                  f"Supported types: {supported}")
-            imgs, dds, idxs = _BULK_REACTION_TYPE_DISPATCH[rtype](
-                atoms, config_dict, n_attempts)
+            with _generator_rng_scope(rng_factory, attempt_offset, rtype):
+                imgs, dds, idxs = _BULK_REACTION_TYPE_DISPATCH[rtype](
+                    atoms, config_dict, n_attempts)
+            if rng_factory is not None:
+                for local_idx, image in enumerate(imgs):
+                    if image is not None:
+                        image.info["rng_provenance"] = rng_factory.provenance_for_attempt(
+                            attempt_offset + local_idx, rtype
+                        )
             images.extend(imgs)
             displacement_dicts.extend(dds)
             selected_indices.extend(idxs)
+            attempt_offset += int(n_attempts)
 
     elif config_dict["ourDimer"]["dataset_type"] == "oc":
 
@@ -1910,16 +2097,25 @@ def get_attempts(atoms, config_dict):
         num_per_type = config_dict["ourDimer"].get("num_attempts_per_type", 1)
         counts = _resolve_attempts_per_type(num_per_type, reaction_types_list)
 
+        attempt_offset = 0
         for rtype, n_attempts in zip(reaction_types_list, counts):
             if rtype not in _OC_REACTION_TYPE_DISPATCH:
                 supported = ", ".join(_OC_REACTION_TYPE_DISPATCH.keys())
                 raise ValueError(f"Unknown OC reaction type: '{rtype}'. "
                                  f"Supported types: {supported}")
-            imgs, dds, idxs = _OC_REACTION_TYPE_DISPATCH[rtype](
-                atoms, config_dict, n_attempts)
+            with _generator_rng_scope(rng_factory, attempt_offset, rtype):
+                imgs, dds, idxs = _OC_REACTION_TYPE_DISPATCH[rtype](
+                    atoms, config_dict, n_attempts)
+            if rng_factory is not None:
+                for local_idx, image in enumerate(imgs):
+                    if image is not None:
+                        image.info["rng_provenance"] = rng_factory.provenance_for_attempt(
+                            attempt_offset + local_idx, rtype
+                        )
             images.extend(imgs)
             displacement_dicts.extend(dds)
             selected_indices.extend(idxs)
+            attempt_offset += int(n_attempts)
 
     else:
         raise Exception("dataset_type in ourDimer must be set")

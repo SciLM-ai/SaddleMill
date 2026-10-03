@@ -13,15 +13,37 @@ from saddlemill.config import (load_config, load_method, get_trajes_and_indices,
                             archive_and_clean_outputs, build_redo_info)
 
 
-def check_and_print_status(futures, total):
+def check_and_print_status(futures, total, task_counts=None, failures=None):
+    """Collect completed Futures without aborting executor cleanup.
+
+    Launcher/executor exceptions are recorded separately from scientific method
+    outcomes.  A Future that returns normally is a successful launcher task even
+    if the method itself recorded a scientific ``not_converged`` status.
+    """
     done, futures = concurrent.futures.wait(futures, timeout=0.1)
     for f in done:
         try:
             f.result()
         except Exception as e:
             print(f"[worker task died] {e}", flush=True)
+            if task_counts is not None:
+                task_counts["failed"] += 1
+            if failures is not None:
+                failures.append(f"worker task: {e}")
+        else:
+            if task_counts is not None:
+                task_counts["successful"] += 1
     if done:
-        print(f"{len(futures)} REMAINING --- {total-len(futures)} FINISHED --- {total} TOTAL")
+        completed = total - len(futures)
+        if task_counts is None:
+            print(f"{len(futures)} REMAINING --- {completed} COMPLETED --- {total} TOTAL")
+        else:
+            print(
+                f"{len(futures)} REMAINING --- {completed} COMPLETED --- {total} TOTAL; "
+                f"{task_counts['successful']} SUCCESSFUL --- "
+                f"{task_counts['failed']} FAILED",
+                flush=True,
+            )
     return futures
 
 def main():
@@ -41,8 +63,12 @@ def main():
     redo_info = {}
 
     from saddlemill.config import _expected_dimer_entries
+    method_name = config_dict["Main"]["method"]
     chunk_size = config_dict["Main"]["attempt_chunk_size"]
-    n_expected = _expected_dimer_entries(config_dict)   # None unless Dimer with reaction_types set
+    # Attempt chunking is a Dimer orchestration feature.  Other methods may use
+    # entries_to_run for their own subunits (notably DoubleMin sides), but those
+    # sets must remain together in one task.
+    n_expected = _expected_dimer_entries(config_dict) if method_name == "Dimer" else None
 
     if can_resume:
         trajes_and_idxs_old = read_ordered_traj_names()
@@ -97,6 +123,10 @@ def main():
     else:
         # Serial Mode: Use empty context and a dummy submitter that runs immediately
         init_data = init_function()
+        # Executorlib injects its worker ID when it calls the task.  Serial
+        # dispatch has no executor to do that, so use the sole serial worker's
+        # stable identity instead of allowing status rows named/ranked None.
+        init_data["executorlib_worker_id"] = 0
         executor = nullcontext()
         get_submitter = lambda _: lambda fn, *args, **kwargs: fn(*args, **init_data, **kwargs)
 
@@ -140,57 +170,106 @@ def main():
         def close_src(src):
             src.close()
 
+    task_counts = {
+        "scanned": 0,
+        "filtered": 0,
+        "submitted": 0,
+        "successful": 0,
+        "failed": 0,
+    }
+    failures = []
+
     with executor as exe:
         submitter = get_submitter(exe)
         futures = []
         idx = 0
-        submitted = 0
 
         for src_path, group in groupby(trajes_and_idxs, key=lambda x: x[0]):
             src = open_src(src_path)
             try:
                 for _, i, j in group:
                     job_id = job_IDs[idx]
+                    task_counts["scanned"] += 1
                     images, extra = load_item(src, i, j)
                     if not passes_input_filter(images, config_dict):
+                        task_counts["filtered"] += 1
                         idx += 1
                         continue
                     try:
                         entries = redo_info.get(job_id)
-                        if chunk_size <= 0:
-                            chunks = [entries]                       # off → unchanged
+                        if method_name != "Dimer" or chunk_size <= 0:
+                            chunks = [entries]
                         elif entries is None:
-                            # fresh structure: chunk the full expected attempt range
+                            # Fresh Dimer structure: chunk the full generated attempt range.
                             if n_expected is None:
-                                chunks = [None]                      # can't determine count → run all
+                                chunks = [None]
                             else:
                                 rng = list(range(n_expected))
-                                chunks = [set(rng[k:k+chunk_size]) for k in range(0, n_expected, chunk_size)]
+                                chunks = [
+                                    set(rng[k:k + chunk_size])
+                                    for k in range(0, n_expected, chunk_size)
+                                ]
                         else:
+                            # Resumed Dimer: preserve the selected attempt IDs while
+                            # splitting only this method's attempt-level work.
                             entries = sorted(entries)
-                            chunks = [set(entries[k:k+chunk_size]) for k in range(0, len(entries), chunk_size)] or [set()]
+                            chunks = [
+                                set(entries[k:k + chunk_size])
+                                for k in range(0, len(entries), chunk_size)
+                            ] or [set()]
+
                         for ch in chunks:
-                            f = submitter(method, job_id, config_dict, images,
-                                          continuation_data=previous_results.get(job_id),
-                                          entries_to_run=ch,
-                                          **extra)
-                            if config_dict["Main"]["executorlib"]: futures.append(f)
-                            submitted += 1
-                    except Exception as e:
-                        print(f"CRITICAL ERROR on job {idx} ({src_path}): {e}")
-                        # In serial mode, we catch it and move on.
-                        # In parallel mode, 'submitter' usually doesn't raise immediately, so this is safe.
-                    idx += 1
+                            # Count each launcher dispatch attempt before calling the
+                            # submitter so serial and submit-time failures are visible.
+                            task_counts["submitted"] += 1
+                            try:
+                                f = submitter(
+                                    method, job_id, config_dict, images,
+                                    continuation_data=previous_results.get(job_id),
+                                    entries_to_run=ch,
+                                    **extra,
+                                )
+                            except Exception as e:
+                                task_counts["failed"] += 1
+                                failures.append(f"job {job_id}: {e}")
+                                print(
+                                    f"CRITICAL ERROR on job {job_id} ({src_path}): {e}",
+                                    flush=True,
+                                )
+                                continue
+
+                            if config_dict["Main"]["executorlib"]:
+                                futures.append(f)
+                            else:
+                                task_counts["successful"] += 1
+                    finally:
+                        idx += 1
             finally:
                 close_src(src)
 
-        print(f"Scanned {idx} input frame(s); submitted {submitted} "
-              f"(skipped {idx - submitted} by input_statuses).", flush=True)
-
         if config_dict["Main"]["executorlib"]:
-            while len(futures):
-                futures = check_and_print_status(futures, submitted)
+            while futures:
+                futures = check_and_print_status(
+                    futures, task_counts["submitted"], task_counts, failures
+                )
+
+    print(
+        f"Scanned {task_counts['scanned']} input frame(s); "
+        f"filtered {task_counts['filtered']}; "
+        f"submitted {task_counts['submitted']} task(s); "
+        f"successful {task_counts['successful']}; "
+        f"failed {task_counts['failed']}.",
+        flush=True,
+    )
+    if failures:
+        print(
+            f"Launcher detected {len(failures)} execution/submission failure(s); "
+            "returning nonzero status after executor cleanup.",
+            flush=True,
+        )
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

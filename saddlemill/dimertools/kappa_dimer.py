@@ -10,8 +10,13 @@ from ase.mep.dimer import (
 )
 
 from saddlemill.dimertools.lbfgs_dimer import (
+    BowlBreakoutMixin,
     LBFGSRotationMixin,
     LBFGSDimerEigenmodeSearch,
+)
+from saddlemill.dimertools.legacy_dimer_adapter import (
+    EntryTorqueDimerEigenmodeSearch,
+    _publish_entry_torque_capture,
 )
 
 norm = np.linalg.norm
@@ -82,7 +87,7 @@ class LBFGSKappaEigenmodeSearch(LBFGSRotationMixin, KappaEigenmodeSearch):
     """L-BFGS direction optimizer for the constrained Phase-B rotation."""
 
 
-class KappaMinModeAtoms(MinModeAtoms):
+class KappaMinModeAtoms(BowlBreakoutMixin, MinModeAtoms):
     """Phase-A/Phase-B kappa dimer with configurable rotation solver."""
 
     def __init__(
@@ -93,9 +98,12 @@ class KappaMinModeAtoms(MinModeAtoms):
         kappa_control=None,
         rotation_optimizer="ase",
         rotation_lbfgs_options=None,
+        convex_escape="standard",
+        bowl_active_atoms=20,
         **kwargs,
     ):
         super().__init__(atoms, **kwargs)
+        self.configure_bowl_breakout(convex_escape, bowl_active_atoms)
         self.beta = float(beta)
         self.kappa = 0.0
         self.recover_fmax = float(recover_fmax)
@@ -122,6 +130,7 @@ class KappaMinModeAtoms(MinModeAtoms):
         self.kappa_active = True
         self.translation_regime = "kappa"
         self.last_rotation_diagnostics = {}
+        self.last_dimer_entry_torque = None
         # Gamma scaling actually applied at the last CENTER evaluation. Exposed
         # so the translator can report how strongly the projected force is
         # being attenuated relative to the real force.
@@ -164,13 +173,15 @@ class KappaMinModeAtoms(MinModeAtoms):
         phase_a_class = (
             LBFGSDimerEigenmodeSearch
             if self.rotation_optimizer == "lbfgs"
-            else DimerEigenmodeSearch
+            else EntryTorqueDimerEigenmodeSearch
         )
         search_A, phase_a_diag = self._run_search(
             phase_a_class,
             self.control,
             self.eigenmodes[0],
         )
+        _publish_entry_torque_capture(self, search_A)
+        phase_a_diag["entry_torque"] = dict(self.last_dimer_entry_torque or {})
         search_A.set_up_for_optimization_step()
         eigenmode = search_A.get_eigenmode()
         curvature_A = search_A.get_curvature()
@@ -206,7 +217,13 @@ class KappaMinModeAtoms(MinModeAtoms):
             guess = perpendicular_vector(eigenmode, f_hat)
             if norm(guess) > 1.0e-8:
                 return guess / norm(guess)
-            dummy = np.random.randn(*eigenmode.shape)
+            attempt_rng = getattr(self, "_saddlemill_attempt_rng", None)
+            if attempt_rng is None:
+                dummy = np.random.randn(*eigenmode.shape)
+            else:
+                dummy = attempt_rng.numpy("kappa_phase_b_random_guess").standard_normal(
+                    eigenmode.shape
+                )
             guess = perpendicular_vector(dummy, f_hat)
             return guess / norm(guess)
 
@@ -269,7 +286,9 @@ class KappaMinModeAtoms(MinModeAtoms):
                 self.translation_regime = "standard"
                 self.last_gamma_1 = 1.0
                 self.last_gamma_2 = 0.0
-            return -f_parallel
+            return self.apply_bowl_breakout_force_mask(
+                -f_parallel, center=(pos is None)
+            )
 
         # kappa_active was set from the center geometry in find_eigenmodes().
         # Do not switch regimes on optimizer trial positions.
@@ -290,7 +309,11 @@ class KappaMinModeAtoms(MinModeAtoms):
             self.last_gamma_1 = float(gamma_1)
             self.last_gamma_2 = float(gamma_2)
 
-        return -(gamma_1 * f_parallel) + (gamma_2 * f_perp)
+        projected = -(gamma_1 * f_parallel) + (gamma_2 * f_perp)
+        # Bowl breakout is inactive once curvature is non-positive, so no force
+        # components are removed here. Preserve the kappa/standard regime set
+        # above for translation-history reset logic.
+        return projected
 
     def eigenmode_log(self):
         if self.mlogfile is not None:

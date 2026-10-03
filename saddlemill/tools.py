@@ -2,6 +2,7 @@ import numpy as np
 import json, os, glob, shutil, tempfile, zipfile, fnmatch
 from ase.neighborlist import neighbor_list, natural_cutoffs
 from ase.io import Trajectory
+from ase.calculators.singlepoint import SinglePointCalculator
 from saddlemill.config import VALID_RUN_CATEGORIES, _RUN_CATEGORY_ALIASES, _get_subunit_config
 
 
@@ -256,153 +257,390 @@ def read_ordered_traj_names():
 
 
 def clean_up_files(config_dict):
-    """Remove leftover temp files from a previous interrupted run.
+    """Clean only documented per-run scratch names from the working directory.
 
-    Each method writes its own set of temp files into the working directory.
-    On resume, these leftovers must be cleaned up so they don't collide with
-    new runs.  For VASP NEB, per-image directories (VASP_{job_id}_{image_idx}/)
-    are also removed.
+    Flux stdout/stderr are diagnostics, so current numeric worker logs are moved
+    into ``resume_cleanup_diagnostics/`` instead of being destroyed; existing
+    ``*.bak`` files are left untouched. VASP cleanup is method-specific and only
+    removes numeric per-job scratch directories, never an arbitrary ``VASP_*``.
     """
-    import glob as _glob
-    import shutil
+    import re
 
     method_name = config_dict["Main"]["method"]
-
-    patterns = {
+    file_patterns = {
         "NEB": [
-            "neb_*.log", "neb_*.traj",
-            "reactant_relaxation_*.log", "reactant_relaxation_*.traj",
-            "product_relaxation_*.log", "product_relaxation_*.traj",
-            "diffusion_barrier_*.png",
-            "imin_relax_*.log", "imin_relax_*.traj",
-            "dimer_ci_*.log", "dimer_ci_*.traj",
-            "neb_refine_*.log", "neb_refine_*.traj",
+            r"neb_\d+\.(?:log|traj)",
+            r"reactant_relaxation_\d+\.(?:log|traj)",
+            r"product_relaxation_\d+\.(?:log|traj)",
+            r"diffusion_barrier_\d+\.png",
+            r"imin_relax_\d+_img\d+\.(?:log|traj)",
+            r"dimer_ci(?:_control)?_\d+_img\d+\.(?:log|traj)",
+            r"neb_refine_\d+\.(?:log|traj)",
         ],
         "Dimer": [
-            "dimer_control_*.log", "dimer_opt_*.log", "dimer_*.traj",
+            r"dimer_control_\d+(?:_\d+(?:_-?\d+)?)?\.log",
+            r"dimer_opt_\d+(?:_\d+(?:_-?\d+)?)?\.log",
+            r"dimer_sella_opt_\d+_\d+_-?\d+\.log",
+            r"dimer_mode_\d+_\d+_-?\d+\.log",
+            r"dimer_\d+(?:_\d+(?:_-?\d+)?)?\.traj",
+            r"dimer_sella_\d+_\d+_-?\d+\.traj",
         ],
-        "Minimization": [
-            "optimization_*.log", "optimization_*.traj",
-        ],
+        "Minimization": [r"optimization_\d+\.(?:log|traj)"],
         "DoubleMinimization": [
-            "optimization_*.log", "optimization_*.traj",
-            "dimer_refine_*.log",
+            r"optimization_\d+(?:_(?:-1|1))?\.(?:log|traj)",
+            r"dimer_refine_\d+\.log",
         ],
-        "SinglePoint": [],  # SP writes no temp files in cwd.
+        "SinglePoint": [],
+        "Hessian": [],
     }
+    compiled_files = [re.compile(rf"^(?:{pattern})$") for pattern in file_patterns.get(method_name, [])]
 
-    # Each method creates per-job-unit directories named VASP_{job_id}[_{subunit}]/
-    # (NEB → _image_idx, Dimer → _attempt, DM → _-1/_0/_1, Min/SP → no suffix).
-    # The single VASP_* glob matches all of these (file-or-directory).
-    if config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive"):
-        patterns.setdefault(method_name, []).append("VASP_*")
+    for name in list(os.listdir(".")):
+        path = os.path.join(".", name)
+        if os.path.isfile(path) and any(pattern.fullmatch(name) for pattern in compiled_files):
+            os.remove(path)
 
-    # Flux log files and their backups (common to all methods)
-    patterns.setdefault(method_name, [])
-    patterns[method_name].extend(["flux_*.out", "flux_*.err", "flux_*.out.bak", "flux_*.err.bak"])
+    if config_dict["Main"].get("Calculator") in ("Vasp", "VaspInteractive"):
+        vasp_pattern = {
+            "NEB": r"^VASP_\d+_\d+$",
+            "Dimer": r"^VASP_\d+_\d+$",
+            "DoubleMinimization": r"^VASP_\d+_(?:-1|0|1)$",
+            "Minimization": r"^VASP_\d+$",
+            "SinglePoint": r"^VASP_\d+$",
+        }.get(method_name)
+        if vasp_pattern:
+            matcher = re.compile(vasp_pattern)
+            for name in list(os.listdir(".")):
+                path = os.path.join(".", name)
+                if matcher.fullmatch(name) and os.path.isdir(path):
+                    shutil.rmtree(path)
 
-    for pat in patterns.get(method_name, []):
-        for f in _glob.glob(pat):
-            if os.path.isdir(f):
-                shutil.rmtree(f)
-            else:
-                os.remove(f)
+    # Preserve useful worker diagnostics while still freeing the canonical names
+    # that executorlib may reuse on the next launch. Deliberately do not touch
+    # flux_*.out.bak / flux_*.err.bak.
+    flux_matcher = re.compile(r"^flux_\d+\.(?:out|err)$")
+    flux_logs = [name for name in os.listdir(".") if flux_matcher.fullmatch(name)]
+    if flux_logs:
+        diag_dir = "resume_cleanup_diagnostics"
+        os.makedirs(diag_dir, exist_ok=True)
+        for name in sorted(flux_logs):
+            src = os.path.join(".", name)
+            index = 0
+            while True:
+                dst = os.path.join(diag_dir, f"{name}.previous_{index}")
+                if not os.path.exists(dst):
+                    break
+                index += 1
+            os.replace(src, dst)
 
 
 #==============================================================================
 ### PREVIOUS RESULT EXTRACTION (for continue-from-result on resume)
 
-def _build_output_traj_index(method_name):
-    """Scan output trajectories and build a map: src_index -> list of Atoms.
 
-    Stores the deserialized Atoms objects directly so that extraction
-    functions can return them without re-reading from disk.
+class ResumeIntegrityError(ValueError):
+    """Active resume evidence is unreadable or has conflicting identities."""
+
+
+def _info_chain(info):
+    current = info if isinstance(info, dict) else {}
+    seen = set()
+    for _ in range(32):
+        marker = id(current)
+        if marker in seen:
+            return
+        seen.add(marker)
+        yield current
+        child = current.get("orig_info")
+        if not isinstance(child, dict):
+            return
+        current = child
+
+
+def _legacy_info_value(info, key, aliases=()):
+    keys = (key,) + tuple(aliases)
+    for level in _info_chain(info):
+        for candidate in keys:
+            if candidate in level:
+                return level[candidate]
+    return None
+
+
+def _frame_job_id(atoms):
+    """Return the current stage job ID; never substitute an upstream lineage ID."""
+    info = getattr(atoms, "info", {}) or {}
+    if "src_index" not in info:
+        raise ResumeIntegrityError(
+            "Output frame lacks top-level src_index. Refusing to use an orig_info "
+            "src_index because that may be an upstream source after stage renumbering."
+        )
+    try:
+        return int(info["src_index"])
+    except (TypeError, ValueError) as exc:
+        raise ResumeIntegrityError(f"Invalid output-frame src_index {info.get('src_index')!r}") from exc
+
+
+def _frame_subunit_id(method_name, atoms):
+    info = getattr(atoms, "info", {}) or {}
+    if method_name == "Dimer":
+        key, aliases = "attempt_id", ()
+    elif method_name == "DoubleMinimization":
+        key, aliases = "side", ()
+    elif method_name == "NEB":
+        key, aliases = "subband_idx", ("sub_band_id",)
+    else:
+        return None
+    value = _legacy_info_value(info, key, aliases)
+    if value is None:
+        raise ResumeIntegrityError(
+            f"{method_name} output frame for job {_frame_job_id(atoms)} lacks {key} metadata"
+        )
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ResumeIntegrityError(f"Invalid {method_name} {key} metadata {value!r}") from exc
+
+
+def _frame_image_idx(atoms):
+    value = _legacy_info_value(getattr(atoms, "info", {}) or {}, "image_idx")
+    if value is None:
+        raise ResumeIntegrityError("NEB output frame lacks image_idx metadata")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ResumeIntegrityError(f"Invalid NEB image_idx metadata {value!r}") from exc
+
+
+def _frame_resume_identity(method_name, atoms):
+    jid = _frame_job_id(atoms)
+    if method_name == "NEB":
+        return (method_name, jid, "subband_idx", _frame_subunit_id(method_name, atoms),
+                "image_idx", _frame_image_idx(atoms))
+    if method_name in ("Dimer", "DoubleMinimization"):
+        namespace = "attempt_id" if method_name == "Dimer" else "side"
+        return (method_name, jid, namespace, _frame_subunit_id(method_name, atoms))
+    return (method_name, jid, "job", None)
+
+
+def _value_equivalent(left, right):
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        try:
+            a = np.asarray(left)
+            b = np.asarray(right)
+            if a.shape != b.shape or a.dtype.kind != b.dtype.kind:
+                return False
+            try:
+                return bool(np.array_equal(a, b, equal_nan=True))
+            except TypeError:
+                return bool(np.array_equal(a, b))
+        except Exception:
+            return False
+    if isinstance(left, np.generic):
+        left = left.item()
+    if isinstance(right, np.generic):
+        right = right.item()
+    if isinstance(left, dict) and isinstance(right, dict):
+        if set(left) != set(right):
+            return False
+        return all(_value_equivalent(left[key], right[key]) for key in left)
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        return len(left) == len(right) and all(
+            _value_equivalent(a, b) for a, b in zip(left, right)
+        )
+    if isinstance(left, float) and isinstance(right, float):
+        if np.isnan(left) and np.isnan(right):
+            return True
+    try:
+        result = left == right
+    except Exception:
+        return False
+    if isinstance(result, np.ndarray):
+        return bool(np.all(result))
+    return bool(result)
+
+
+def _constraint_signature(atoms):
+    constraints = getattr(atoms, "constraints", []) or []
+    signatures = []
+    for constraint in constraints:
+        if hasattr(constraint, "todict"):
+            value = constraint.todict()
+        elif hasattr(constraint, "__dict__"):
+            value = dict(constraint.__dict__)
+        else:
+            value = repr(constraint)
+        signatures.append((
+            f"{type(constraint).__module__}.{type(constraint).__name__}", value
+        ))
+    return signatures
+
+
+def _frame_equivalent(left, right):
+    """Exact duplicate check; positions alone are intentionally insufficient."""
+    for attr in ("numbers", "positions", "cell", "pbc"):
+        if not _value_equivalent(getattr(left, attr, None), getattr(right, attr, None)):
+            return False
+    if not _value_equivalent(getattr(left, "arrays", {}) or {}, getattr(right, "arrays", {}) or {}):
+        return False
+    if not _value_equivalent(getattr(left, "info", {}) or {}, getattr(right, "info", {}) or {}):
+        return False
+    if not _value_equivalent(_constraint_signature(left), _constraint_signature(right)):
+        return False
+    left_calc = getattr(left, "calc", None)
+    right_calc = getattr(right, "calc", None)
+    left_results = getattr(left_calc, "results", {}) if left_calc is not None else {}
+    right_results = getattr(right_calc, "results", {}) if right_calc is not None else {}
+    return _value_equivalent(left_results or {}, right_results or {})
+
+
+def _build_output_traj_index(method_name, wanted_job_ids=None, wanted_subunits=None):
+    """Build a selected-job continuation index with explicit frame identities.
+
+    Active output trajectories are fail-closed: unreadable/truncated files raise
+    ``ResumeIntegrityError``. Exact duplicate frames for the same identity collapse
+    deterministically to the last physical occurrence; conflicting duplicates raise
+    instead of silently selecting the first. Scientifically distinct attempt/sub-band
+    identities are never merged merely because positions match.
     """
-    index = {}
+    import warnings
+
+    if method_name == "SinglePoint":
+        return {}
+    wanted_jobs = None if wanted_job_ids is None else {int(x) for x in wanted_job_ids}
+    wanted_subunits = wanted_subunits or {}
+    selected = {}
+    origins = {}
     traj_dir = f"{method_name}_trajes"
     for traj_path in sorted(glob.glob(os.path.join(traj_dir, "*.traj"))):
         try:
-            with Trajectory(traj_path, 'r') as traj:
+            with Trajectory(traj_path, "r") as traj:
                 for frame_idx in range(len(traj)):
                     img = traj[frame_idx]
-                    src_idx = img.info.get('src_index')
-                    if src_idx is not None:
-                        index.setdefault(src_idx, []).append(img)
-        except Exception:
-            continue
-    return index
+                    info = getattr(img, "info", {}) or {}
+                    if "src_index" not in info:
+                        warnings.warn(
+                            f"Skipping output frame without top-level src_index: "
+                            f"{traj_path} frame {frame_idx}. Upstream orig_info "
+                            "src_index is preserved as lineage and is not reused as "
+                            "the current-stage resume identity.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                        continue
+                    jid = _frame_job_id(img)
+                    if wanted_jobs is not None and jid not in wanted_jobs:
+                        continue
+                    identity = _frame_resume_identity(method_name, img)
+                    if method_name == "Dimer" and jid in wanted_subunits:
+                        requested = wanted_subunits[jid]
+                        if None not in requested and _frame_subunit_id(method_name, img) not in requested:
+                            continue
+                    per_job = selected.setdefault(jid, {})
+                    previous = per_job.get(identity)
+                    if previous is not None and not _frame_equivalent(previous, img):
+                        old_path, old_idx = origins[(jid, identity)]
+                        raise ResumeIntegrityError(
+                            "Conflicting duplicate continuation result for identity "
+                            f"{identity!r}: {old_path} frame {old_idx} vs "
+                            f"{traj_path} frame {frame_idx}"
+                        )
+                    # Deterministic last physical occurrence wins only when the
+                    # complete stored result is equivalent.
+                    per_job[identity] = img
+                    origins[(jid, identity)] = (traj_path, frame_idx)
+        except ResumeIntegrityError:
+            raise
+        except Exception as exc:
+            raise ResumeIntegrityError(
+                f"Unreadable/truncated output trajectory {traj_path}: {exc}"
+            ) from exc
+    return {jid: list(frames.values()) for jid, frames in selected.items()}
 
 
 def _sanitize_with_continuation(atoms):
-    """Wrap .info with orig_info (like load_and_sanitize) for extracted results."""
-    atoms.info = {"orig_info": dict(atoms.info)}
-    return atoms
+    """Return a continuation copy with lineage and cached energy/forces intact."""
+    cached = {}
+    calc = getattr(atoms, "calc", None)
+    results = getattr(calc, "results", {}) if calc is not None else {}
+    for key in ("energy", "forces"):
+        if key in results:
+            value = results[key]
+            cached[key] = value.copy() if hasattr(value, "copy") else value
+
+    result = atoms.copy()
+    result.info = {"orig_info": dict(getattr(result, "info", {}) or {})}
+    if cached:
+        result.calc = SinglePointCalculator(result, **cached)
+    return result
 
 
 def extract_previous_results(job_ids, config_dict, redo_info):
-    """Extract previous results from output trajs for continuation.
+    """Extract unambiguous previous outputs needed for continuation.
 
-    All methods extract from {method}_trajes/ uniformly.
-
-    Returns {job_id: continuation_data} where continuation_data is:
-      - Dimer: {attempt_id: Atoms} for attempts that have output
-      - NEB: {subband_idx: [Atoms sorted by image_idx]}
-      - DoubleMinimization: {side: Atoms} for all sides (-1, 0, 1)
-      - Minimization: Atoms
-
-    All extracted Atoms are wrapped with _sanitize_with_continuation.
-    Jobs with no extractable result are omitted (falls back to original input).
+    The current stage ``src_index`` is used only to locate the resume job. The
+    full frame metadata, including upstream ``parent_ts_index`` / Hessian parent
+    lineage and any nested legacy ``orig_info``, is preserved under the returned
+    continuation's ``orig_info``.
     """
     method_name = config_dict["Main"]["method"]
-    _, info_key = _get_subunit_config(method_name)
-    output_traj_index = _build_output_traj_index(method_name)
+    if method_name == "SinglePoint" or not job_ids:
+        return {}
+
+    requested_jobs = [int(jid) for jid in job_ids if jid in redo_info]
+    if not requested_jobs:
+        return {}
+    wanted_subunits = redo_info if method_name == "Dimer" else None
+    output_traj_index = _build_output_traj_index(
+        method_name,
+        wanted_job_ids=requested_jobs,
+        wanted_subunits=wanted_subunits,
+    )
     results = {}
 
-    for job_id in job_ids:
-        if job_id not in redo_info:
-            continue
+    for job_id in requested_jobs:
         frames = output_traj_index.get(job_id, [])
         if not frames:
             continue
 
-        if method_name == "Minimization":
-            _sanitize_with_continuation(frames[0])
-            results[job_id] = frames[0]
-        elif method_name == "SinglePoint":
-            # SP has no continuation semantics. Skip; method ignores the data.
+        if method_name in ("Minimization", "Hessian"):
+            if len(frames) != 1:
+                raise ResumeIntegrityError(
+                    f"Expected one {method_name} continuation frame for job {job_id}, "
+                    f"found {len(frames)}"
+                )
+            results[job_id] = _sanitize_with_continuation(frames[0])
             continue
-        else:
-            # Group frames by subunit_id
-            grouped = {}
-            for f in frames:
-                subunit_id = f.info.get(info_key)
-                grouped.setdefault(subunit_id, []).append(f)
 
-            if method_name == "NEB":
-                # Sort each subband's images by image_idx
-                for sid in grouped:
-                    grouped[sid].sort(key=lambda a: a.info.get('image_idx', 0))
+        grouped = {}
+        for frame in frames:
+            subunit_id = _frame_subunit_id(method_name, frame)
+            grouped.setdefault(subunit_id, []).append(frame)
 
-            if method_name in ("Dimer", "DoubleMinimization"):
-                # Flatten: each subunit maps to a single Atoms
-                grouped = {sid: atoms_list[0] for sid, atoms_list in grouped.items()
-                           if atoms_list}
-
-            # Sanitize all frames
-            for sid, data in grouped.items():
-                if isinstance(data, list):
-                    for atoms in data:
-                        _sanitize_with_continuation(atoms)
-                else:
-                    _sanitize_with_continuation(data)
-
+        if method_name == "NEB":
+            for subunit_id, atoms_list in grouped.items():
+                atoms_list.sort(key=_frame_image_idx)
+                grouped[subunit_id] = [
+                    _sanitize_with_continuation(atoms) for atoms in atoms_list
+                ]
             results[job_id] = grouped
+            continue
+
+        # Dimer and DoubleMin identities are one frame per attempt/side after
+        # conflict-aware indexing. DoubleMin deliberately retains all available
+        # -1/0/+1 frames so a one-sided redo can keep the completed endpoint.
+        flattened = {}
+        for subunit_id, atoms_list in grouped.items():
+            if len(atoms_list) != 1:
+                raise ResumeIntegrityError(
+                    f"Expected one {method_name} result for job {job_id} "
+                    f"{_get_subunit_config(method_name)[1]}={subunit_id}, "
+                    f"found {len(atoms_list)}"
+                )
+            flattened[subunit_id] = _sanitize_with_continuation(atoms_list[0])
+        results[job_id] = flattened
 
     return results
 
-
-#==============================================================================
-### BOND-BREAKING/FORMING DETECTION
 
 def get_bond_set(atoms, cutoffs, tag_filter=None):
     """
@@ -488,4 +726,3 @@ def check_adsorbate_reaction(atoms_initial, atoms_final, neighbor_fudge=1.25, ta
     }
 
 #==============================================================================
-

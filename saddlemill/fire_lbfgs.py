@@ -14,10 +14,17 @@ from dataclasses import dataclass
 import warnings
 
 import numpy as np
-from ase.optimize import FIRE
+from ase.optimize import FIRE, LBFGS
 from ase.optimize.optimize import Optimizer
 
-from saddlemill.dimertools.lbfgs_dimer import _ASELBFGSState
+from saddlemill.dimertools.lbfgs_dimer import (
+    _ASELBFGSState,
+    _CurvatureGuardedLBFGS,
+    _ase_lbfgs_diagnostic_metrics,
+    _cosine_alignment,
+    _lbfgs_step_metrics,
+)
+from saddlemill.dimertools.ase_lbfgs_adapter import _ase_lbfgs_get
 
 
 @dataclass
@@ -92,8 +99,276 @@ class ForceThresholdController:
         return HybridDecision(self.state, "", 0)
 
 
+class DiagnosticLBFGS(_CurvatureGuardedLBFGS):
+    """ASE L-BFGS plus optional secant safeguards and diagnostics.
+
+    With ``curvature_guard='off'`` (the SaddleMill default), the numerical
+    history update and step are stock ASE L-BFGS.  ``skip``, shifted-secant
+    ``damp``, classical ``powell`` damping, and ``reset`` change only how a
+    secant pair is handled before ASE's native two-loop recursion is called.
+    """
+
+    def __init__(
+        self,
+        *args,
+        curvature_guard="off",
+        curvature_floor=1.0e-3,
+        powell_eta=0.2,
+        **kwargs,
+    ):
+        qn_shadow_options = kwargs.pop("qn_shadow_options", None)
+        from saddlemill.dimertools.wave_b_shadow import normalize_qn_shadow_options
+        self.qn_shadow_options = normalize_qn_shadow_options(qn_shadow_options)
+        self.last_qn_shadow_row = None
+        self.last_qn_shadow_matrix = None
+        self.qn_shadow_cumulative_ns = 0
+        alpha = kwargs.get("alpha", 70.0)
+        memory = kwargs.get("memory", 100)
+        damping = kwargs.get("damping", 1.0)
+        self.sm_alpha = 70.0 if alpha is None else float(alpha)
+        self.sm_memory = int(memory)
+        self.sm_damping = float(damping)
+        super().__init__(
+            *args,
+            curvature_guard=curvature_guard,
+            curvature_floor=curvature_floor,
+            powell_eta=powell_eta,
+            **kwargs,
+        )
+        self.last_step_diagnostics = None
+        self._diagnostic_serial = 0
+        self._sm_raw_direction = None
+
+    def determine_step(self, dr):
+        # ASE rescales this array in place. Preserve the original proposal for
+        # diagnostics, then delegate the numerical operation unchanged.
+        self._sm_raw_direction = np.asarray(dr, dtype=float).reshape(-1).copy()
+        return super().determine_step(dr)
+
+    def line_search(self, *args, **kwargs):
+        # The line-search path bypasses determine_step(). Capture the native
+        # quasi-Newton direction before ASE's line-search machinery uses it.
+        self._sm_raw_direction = np.asarray(self.p, dtype=float).reshape(-1).copy()
+        return super().line_search(*args, **kwargs)
+
+    def step(self, forces=None):
+        if forces is None:
+            forces = -self.optimizable.get_gradient()
+        force = np.asarray(forces, dtype=float).reshape(-1)
+        before = np.asarray(self.optimizable.get_x(), dtype=float).reshape(-1).copy()
+        force_calls_before = int(getattr(self, "force_calls", 0))
+        function_calls_before = int(getattr(self, "function_calls", 0))
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Please do not pass forces to step\(\)\..*",
+                category=UserWarning,
+                module=r"ase\.optimize\.optimize",
+            )
+            super().step(forces=force)
+        after = np.asarray(self.optimizable.get_x(), dtype=float).reshape(-1)
+        displacement = after - before
+        raw_source = self._sm_raw_direction
+        if raw_source is None:
+            raw_source = self.p
+        raw_direction = np.asarray(raw_source, dtype=float).reshape(-1)
+        step_metrics = _lbfgs_step_metrics(
+            self.optimizable, raw_direction, displacement, self.maxstep, self.damping
+        )
+        metrics = _ase_lbfgs_diagnostic_metrics(self)
+        guard = self.sm_guard_metrics()
+        metrics.update({
+            "alpha": self.sm_alpha,
+            "initial_inverse_hessian_scale": 1.0 / self.sm_alpha,
+            "memory": self.sm_memory,
+            "damping": self.sm_damping,
+        })
+        if self.use_line_search:
+            # Line-search LBFGS does not use determine_step()*damping. Keep the
+            # proposal/accepted displacement diagnostics but do not mislabel a
+            # line-search scale as native maxstep clipping.
+            step_metrics["step_clipped"] = ""
+            step_metrics["maxstep_rescaled"] = ""
+            step_metrics["clip_scale"] = ""
+            step_metrics["damping"] = ""
+        line_search_force_calls = int(getattr(self, "force_calls", 0)) - force_calls_before
+        line_search_function_calls = (
+            int(getattr(self, "function_calls", 0)) - function_calls_before
+        )
+        self._diagnostic_serial += 1
+        self.last_step_diagnostics = {
+            "diagnostic_serial": self._diagnostic_serial,
+            "optimizer_step": int(self.nsteps) + 1,
+            "active_optimizer": "lbfgs",
+            "switch_event": "",
+            "fmax": float(self.optimizable.gradient_norm(force)),
+            "step_norm": float(step_metrics["actual_step_norm"]),
+            "step_clipped": (
+                "" if step_metrics["step_clipped"] == ""
+                else int(step_metrics["step_clipped"])
+            ),
+            "direction_alignment": _cosine_alignment(raw_direction, force),
+            "raw_step_norm": step_metrics["raw_step_norm"],
+            "raw_step_max": step_metrics["raw_step_max"],
+            "actual_step_norm": step_metrics["actual_step_norm"],
+            "actual_step_max": step_metrics["actual_step_max"],
+            "maxstep": step_metrics["maxstep"],
+            "maxstep_rescaled": step_metrics["maxstep_rescaled"],
+            "clip_scale": step_metrics["clip_scale"],
+            "damping": step_metrics["damping"],
+            "applied_scale": step_metrics["applied_scale"],
+            "warm_start_history": "",
+            "history_pairs_at_switch": "",
+            "lbfgs_history_size": int(metrics["history_size"]),
+            "lbfgs_pairs_accepted_total": int(guard.get("pairs_accepted", 0)),
+            "lbfgs_pairs_rejected_total": int(guard.get("pairs_skipped", 0))
+            + int(guard.get("pairs_damped", 0)),
+            "lbfgs_pairs_skipped_total": int(guard.get("pairs_skipped", 0)),
+            "lbfgs_pairs_damped_total": int(guard.get("pairs_damped", 0)),
+            "lbfgs_pairs_powell_damped_total": int(guard.get("pairs_powell_damped", 0)),
+            "lbfgs_worst_raw_s_dot_y": guard.get("worst_sy", ""),
+            "lbfgs_history_resets": int(guard.get("curvature_resets", 0)),
+            "lbfgs_last_reset_reason": "",
+            "lbfgs_curvature_guard": guard.get("guard_mode", "off"),
+            "lbfgs_curvature_floor": guard.get("curvature_floor", ""),
+            "lbfgs_powell_eta": guard.get("powell_eta", ""),
+            "lbfgs_latest_guard_action": guard.get("last_guard_action", ""),
+            "lbfgs_latest_powell_theta": guard.get("last_powell_theta", ""),
+            "lbfgs_latest_powell_s_dot_Bs": guard.get("last_powell_s_dot_Bs", ""),
+            "lbfgs_alpha": metrics.get("alpha", ""),
+            "lbfgs_initial_inverse_hessian_scale": metrics.get(
+                "initial_inverse_hessian_scale", ""
+            ),
+            "lbfgs_memory": metrics.get("memory", ""),
+            "lbfgs_use_line_search": int(bool(self.use_line_search)),
+            "lbfgs_force_calls": int(getattr(self, "force_calls", 0)),
+            "lbfgs_function_calls": int(getattr(self, "function_calls", 0)),
+            "lbfgs_step_force_calls": line_search_force_calls,
+            "lbfgs_step_function_calls": line_search_function_calls,
+            "lbfgs_alpha_k": (
+                getattr(self, "alpha_k", "") if self.use_line_search else ""
+            ),
+            "lbfgs_latest_s_norm": metrics.get("latest_s_norm", ""),
+            "lbfgs_latest_y_norm": metrics.get("latest_y_norm", ""),
+            "lbfgs_latest_s_dot_y": metrics.get("latest_s_dot_y", ""),
+            "lbfgs_latest_secant_curvature": metrics.get(
+                "latest_secant_curvature", ""
+            ),
+            "lbfgs_latest_secant_cosine": metrics.get("latest_secant_cosine", ""),
+            "lbfgs_latest_force_change_norm": metrics.get(
+                "latest_force_change_norm", ""
+            ),
+            "lbfgs_latest_pair_damped": int(guard.get("last_pair_damped", 0)),
+            "lbfgs_latest_raw_s_dot_y": guard.get("last_raw_pair", {}).get(
+                "s_dot_y", ""
+            ),
+            "lbfgs_latest_raw_secant_curvature": guard.get(
+                "last_raw_pair", {}
+            ).get("secant_curvature", ""),
+            "lbfgs_latest_stored_s_dot_y": guard.get(
+                "last_stored_pair", {}
+            ).get("s_dot_y", ""),
+            "lbfgs_latest_stored_secant_curvature": guard.get(
+                "last_stored_pair", {}
+            ).get("secant_curvature", ""),
+            "fire_dt": "",
+        }
+        self._run_qn_shadow(force, raw_direction)
+        if self.last_qn_shadow_row is not None:
+            self.last_step_diagnostics["t08_qn_shadow"] = dict(self.last_qn_shadow_row)
+
+    def _run_qn_shadow(self, force, raw_direction):
+        self.last_qn_shadow_row = None
+        self.last_qn_shadow_matrix = None
+        if not bool(self.qn_shadow_options.get("enabled", False)):
+            return
+        s_hist = [np.asarray(x, dtype=float).reshape(-1) for x in list(_ase_lbfgs_get(self, "s", []) or [])]
+        y_hist = [np.asarray(x, dtype=float).reshape(-1) for x in list(_ase_lbfgs_get(self, "y", []) or [])]
+        ndim = int(np.asarray(force).size)
+        S = np.stack(s_hist, axis=0) if s_hist else np.empty((0, ndim), dtype=np.float64)
+        Y = np.stack(y_hist, axis=0) if y_hist else np.empty((0, ndim), dtype=np.float64)
+        rho_hist = list(_ase_lbfgs_get(self, "rho", []) or [])
+        if len(rho_hist) == S.shape[0] and all(np.isfinite(float(r)) and float(r) != 0.0 for r in rho_hist):
+            sy = np.asarray([1.0 / float(r) for r in rho_hist], dtype=np.float64)
+            rho = np.asarray([float(r) for r in rho_hist], dtype=np.float64)
+        else:
+            sy = np.asarray([float(np.dot(S[i], Y[i])) for i in range(S.shape[0])], dtype=np.float64)
+            rho = np.divide(1.0, sy, out=np.full_like(sy, np.nan), where=np.isfinite(sy) & (sy != 0.0))
+        # ASE L-BFGS uses the fixed inverse scale H0=I/alpha.  This is the
+        # exact production H0; do not rerun two-loop recursion to rediscover it.
+        h0_scale = 1.0 / float(self.sm_alpha)
+        payload = {
+            "current_two_loop_vector": np.asarray(force, dtype=np.float64).reshape(-1),
+            "s_history": S, "y_history": Y, "sy_history": sy, "rho_history": rho,
+            "raw_lbfgs_direction": np.asarray(raw_direction, dtype=np.float64).reshape(-1),
+            "h0_inverse_scale": np.asarray(h0_scale, dtype=np.float64),
+            "initial_hessian": np.asarray(self.sm_alpha, dtype=np.float64),
+            "dynamic_h0": np.asarray(False, dtype=np.bool_),
+            "replay_active_dof_mask": np.ones(ndim, dtype=np.bool_),
+            "history_order": np.asarray("oldest_to_newest"),
+            "input_vector_role": np.asarray("optimizer_force"),
+            "gradient_sign_convention": np.asarray("g=-F"),
+            "two_loop_sign_convention": np.asarray("raw_lbfgs_direction=H*F=-H*g"),
+            "two_loop_arithmetic": np.asarray("rho_multiply"),
+            "pair_safeguard": np.asarray(str(self.curvature_guard)),
+            "max_pairs": np.asarray(int(self.sm_memory), dtype=np.int64),
+        }
+        from saddlemill.dimertools.wave_b_shadow import run_shadow
+        result, elapsed = run_shadow(
+            payload, options=self.qn_shadow_options,
+            consumer=str(self.qn_shadow_options.get("consumer") or "minimization"),
+            residual_kind=str(self.qn_shadow_options.get("residual_kind") or "physical_force"),
+            force_interpretation=str(self.qn_shadow_options.get("force_interpretation") or "raw_physical_force"),
+            model_type=str(self.qn_shadow_options.get("model_type") or "ordinary_bfgs_hessian"),
+            owner=None,
+        )
+        if result is not None:
+            self.last_qn_shadow_row = dict(result.row)
+            self.last_qn_shadow_matrix = result.matrix
+            self.qn_shadow_cumulative_ns += int(elapsed)
+
+    def hybrid_summary(self):
+        metrics = _ase_lbfgs_diagnostic_metrics(self)
+        guard = self.sm_guard_metrics()
+        metrics.update({
+            "alpha": self.sm_alpha,
+            "initial_inverse_hessian_scale": 1.0 / self.sm_alpha,
+            "memory": self.sm_memory,
+            "damping": self.sm_damping,
+        })
+        return {
+            "final_active_optimizer": "lbfgs",
+            "switch_count": 0,
+            "lbfgs_history_size": int(metrics["history_size"]),
+            "lbfgs_pairs_accepted_total": int(guard.get("pairs_accepted", 0)),
+            "lbfgs_pairs_rejected_total": int(guard.get("pairs_skipped", 0))
+            + int(guard.get("pairs_damped", 0)),
+            "lbfgs_pairs_skipped_total": int(guard.get("pairs_skipped", 0)),
+            "lbfgs_pairs_damped_total": int(guard.get("pairs_damped", 0)),
+            "lbfgs_pairs_powell_damped_total": int(guard.get("pairs_powell_damped", 0)),
+            "lbfgs_history_resets": int(guard.get("curvature_resets", 0)),
+            "lbfgs_last_reset_reason": "",
+            "lbfgs_curvature_guard": guard.get("guard_mode", "off"),
+            "lbfgs_curvature_floor": guard.get("curvature_floor", ""),
+            "lbfgs_powell_eta": guard.get("powell_eta", ""),
+            "lbfgs_latest_guard_action": guard.get("last_guard_action", ""),
+            "lbfgs_latest_powell_theta": guard.get("last_powell_theta", ""),
+            "lbfgs_latest_powell_s_dot_Bs": guard.get("last_powell_s_dot_Bs", ""),
+            "lbfgs_alpha": metrics.get("alpha", ""),
+            "lbfgs_initial_inverse_hessian_scale": metrics.get(
+                "initial_inverse_hessian_scale", ""
+            ),
+            "lbfgs_memory": metrics.get("memory", ""),
+            "lbfgs_use_line_search": int(bool(self.use_line_search)),
+            "lbfgs_force_calls": int(getattr(self, "force_calls", 0)),
+            "lbfgs_function_calls": int(getattr(self, "function_calls", 0)),
+            "maxstep": float(self.maxstep),
+            "damping": metrics.get("damping", ""),
+        }
+
+
 class FIRELBFGS(Optimizer):
-    """ASE FIRE warm-up followed by no-line-search ASE L-BFGS."""
+    """ASE FIRE warm-up followed by optionally safeguarded ASE L-BFGS."""
 
     def __init__(
         self,
@@ -114,6 +389,10 @@ class FIRELBFGS(Optimizer):
         lbfgs_dynamic_h0=False,
         lbfgs_curvature_epsilon=1.0e-12,
         lbfgs_damping=1.0,
+        lbfgs_curvature_guard="off",
+        lbfgs_curvature_floor=1.0e-3,
+        lbfgs_powell_eta=0.2,
+        lbfgs_use_line_search=False,
         enter_fmax=0.20,
         exit_fmax=0.35,
         enter_stable_steps=3,
@@ -158,6 +437,17 @@ class FIRELBFGS(Optimizer):
         self.lbfgs_memory = int(lbfgs_memory)
         self.lbfgs_alpha = float(lbfgs_initial_hessian)
         self.lbfgs_damping = float(lbfgs_damping)
+        self.lbfgs_curvature_guard = str(lbfgs_curvature_guard).strip().lower()
+        self.lbfgs_curvature_floor = float(lbfgs_curvature_floor)
+        self.lbfgs_powell_eta = float(lbfgs_powell_eta)
+        self.lbfgs_use_line_search = bool(lbfgs_use_line_search)
+        if self.lbfgs_use_line_search and self.lbfgs_damping != 1.0:
+            warnings.warn(
+                "FIRELBFGS lbfgs_damping is ignored while "
+                "lbfgs_use_line_search=True because ASE uses alpha_k*p "
+                "directly on the line-search path.",
+                UserWarning,
+            )
         self.warm_start_history = bool(warm_start_history)
         self.reset_history_on_exit = bool(reset_history_on_exit)
         self.controller = ForceThresholdController(
@@ -175,6 +465,10 @@ class FIRELBFGS(Optimizer):
             memory=self.lbfgs_memory,
             damping=self.lbfgs_damping,
             alpha=self.lbfgs_alpha,
+            curvature_guard=self.lbfgs_curvature_guard,
+            curvature_floor=self.lbfgs_curvature_floor,
+            powell_eta=self.lbfgs_powell_eta,
+            use_line_search=self.lbfgs_use_line_search,
         )
         self.snapshots = deque(maxlen=self.lbfgs_memory + 1)
         self.last_step_diagnostics = None
@@ -257,6 +551,11 @@ class FIRELBFGS(Optimizer):
             clipped = bool(np.linalg.norm(displacement) >= self.maxstep)
 
         metrics = self.lbfgs_state.metrics()
+        lbfgs_step = (
+            dict(getattr(self.lbfgs_state, "last_step_metrics", {}) or {})
+            if active == "lbfgs"
+            else {}
+        )
         self._diagnostic_serial += 1
         self.last_step_diagnostics = {
             "diagnostic_serial": self._diagnostic_serial,
@@ -265,21 +564,70 @@ class FIRELBFGS(Optimizer):
             "switch_event": decision.switch_event,
             "fmax": fmax,
             "step_norm": float(step_norm),
-            "step_clipped": int(bool(clipped)),
+            "step_clipped": "" if clipped == "" else int(bool(clipped)),
             "direction_alignment": alignment,
+            "raw_step_norm": lbfgs_step.get("raw_step_norm", ""),
+            "raw_step_max": lbfgs_step.get("raw_step_max", ""),
+            "actual_step_norm": (
+                lbfgs_step.get("actual_step_norm", "") if active == "lbfgs" else step_norm
+            ),
+            "actual_step_max": lbfgs_step.get("actual_step_max", ""),
+            "maxstep": lbfgs_step.get("maxstep", self.maxstep),
+            "maxstep_rescaled": lbfgs_step.get("maxstep_rescaled", ""),
+            "clip_scale": lbfgs_step.get("clip_scale", ""),
+            "damping": lbfgs_step.get("damping", ""),
+            "applied_scale": lbfgs_step.get("applied_scale", ""),
             "warm_start_history": int(self.warm_start_history),
-            "history_pairs_at_switch": int(
-                decision.history_pairs_at_switch
-            ),
+            "history_pairs_at_switch": int(decision.history_pairs_at_switch),
             "lbfgs_history_size": int(metrics["history_size"]),
-            "lbfgs_pairs_accepted_total": int(
-                metrics["pairs_accepted_total"]
-            ),
-            "lbfgs_pairs_rejected_total": int(
-                metrics["pairs_rejected_total"]
-            ),
+            "lbfgs_pairs_accepted_total": int(metrics["pairs_accepted_total"]),
+            "lbfgs_pairs_rejected_total": int(metrics["pairs_rejected_total"]),
+            "lbfgs_pairs_skipped_total": int(metrics.get("pairs_skipped_total", 0)),
+            "lbfgs_pairs_damped_total": int(metrics.get("pairs_damped_total", 0)),
+            "lbfgs_pairs_powell_damped_total": int(metrics.get("pairs_powell_damped_total", 0)),
+            "lbfgs_worst_raw_s_dot_y": metrics.get("worst_sy", ""),
             "lbfgs_history_resets": int(metrics["reset_count"]),
             "lbfgs_last_reset_reason": metrics["last_reset_reason"],
+            "lbfgs_curvature_guard": metrics.get("guard_mode", "off"),
+            "lbfgs_curvature_floor": metrics.get("curvature_floor", ""),
+            "lbfgs_powell_eta": metrics.get("powell_eta", ""),
+            "lbfgs_latest_guard_action": metrics.get("latest_guard_action", ""),
+            "lbfgs_latest_powell_theta": metrics.get("latest_powell_theta", ""),
+            "lbfgs_latest_powell_s_dot_Bs": metrics.get("latest_powell_s_dot_Bs", ""),
+            "lbfgs_alpha": metrics.get("alpha", ""),
+            "lbfgs_initial_inverse_hessian_scale": metrics.get(
+                "initial_inverse_hessian_scale", ""
+            ),
+            "lbfgs_memory": metrics.get("memory", ""),
+            "lbfgs_use_line_search": int(bool(metrics.get("use_line_search", 0))),
+            "lbfgs_force_calls": int(metrics.get("force_calls", 0)),
+            "lbfgs_function_calls": int(metrics.get("function_calls", 0)),
+            "lbfgs_step_force_calls": lbfgs_step.get("step_force_calls", ""),
+            "lbfgs_step_function_calls": lbfgs_step.get(
+                "step_function_calls", ""
+            ),
+            "lbfgs_alpha_k": lbfgs_step.get("alpha_k", ""),
+            "lbfgs_latest_s_norm": metrics.get("latest_s_norm", ""),
+            "lbfgs_latest_y_norm": metrics.get("latest_y_norm", ""),
+            "lbfgs_latest_s_dot_y": metrics.get("latest_s_dot_y", ""),
+            "lbfgs_latest_secant_curvature": metrics.get(
+                "latest_secant_curvature", ""
+            ),
+            "lbfgs_latest_secant_cosine": metrics.get("latest_secant_cosine", ""),
+            "lbfgs_latest_force_change_norm": metrics.get(
+                "latest_force_change_norm", ""
+            ),
+            "lbfgs_latest_pair_damped": metrics.get("latest_pair_damped", ""),
+            "lbfgs_latest_raw_s_dot_y": metrics.get("latest_raw_s_dot_y", ""),
+            "lbfgs_latest_raw_secant_curvature": metrics.get(
+                "latest_raw_secant_curvature", ""
+            ),
+            "lbfgs_latest_stored_s_dot_y": metrics.get(
+                "latest_stored_s_dot_y", ""
+            ),
+            "lbfgs_latest_stored_secant_curvature": metrics.get(
+                "latest_stored_secant_curvature", ""
+            ),
             "fire_dt": float(self.fire_optimizer.dt),
         }
 
@@ -295,7 +643,26 @@ class FIRELBFGS(Optimizer):
             "lbfgs_pairs_rejected_total": int(
                 metrics["pairs_rejected_total"]
             ),
+            "lbfgs_pairs_skipped_total": int(metrics.get("pairs_skipped_total", 0)),
+            "lbfgs_pairs_damped_total": int(metrics.get("pairs_damped_total", 0)),
+            "lbfgs_pairs_powell_damped_total": int(metrics.get("pairs_powell_damped_total", 0)),
+            "lbfgs_use_line_search": int(bool(metrics.get("use_line_search", 0))),
+            "lbfgs_curvature_guard": metrics.get("guard_mode", "off"),
+            "lbfgs_curvature_floor": metrics.get("curvature_floor", ""),
+            "lbfgs_powell_eta": metrics.get("powell_eta", ""),
+            "lbfgs_latest_guard_action": metrics.get("latest_guard_action", ""),
+            "lbfgs_latest_powell_theta": metrics.get("latest_powell_theta", ""),
+            "lbfgs_latest_powell_s_dot_Bs": metrics.get("latest_powell_s_dot_Bs", ""),
+            "lbfgs_alpha": metrics.get("alpha", ""),
+            "lbfgs_initial_inverse_hessian_scale": metrics.get(
+                "initial_inverse_hessian_scale", ""
+            ),
+            "lbfgs_memory": metrics.get("memory", ""),
+            "maxstep": float(self.maxstep),
+            "damping": metrics.get("damping", ""),
             "lbfgs_history_resets": int(metrics["reset_count"]),
             "lbfgs_last_reset_reason": metrics["last_reset_reason"],
+            "lbfgs_force_calls": int(metrics.get("force_calls", 0)),
+            "lbfgs_function_calls": int(metrics.get("function_calls", 0)),
             "warm_start_history": int(self.warm_start_history),
         }

@@ -4,6 +4,7 @@ import csv
 import time
 import traceback
 import zipfile
+import tempfile
 from ase.io import Trajectory
 from ase.filters import FrechetCellFilter
 from ase.calculators.singlepoint import SinglePointCalculator
@@ -14,6 +15,61 @@ from saddlemill.tools import (check_reaction, check_adsorbate_reaction, backup_f
 from saddlemill.dimeropt import _refine_eigenmode
 
 
+DOUBLEMIN_TIMING_FIELDS = [
+    "execution_id",
+    "src_index",
+    "rank",
+    "parent_ts_index",
+    "optimizer",
+    "fmax",
+    "steps_limit",
+    "side_minus1_wall_seconds",
+    "side_plus1_wall_seconds",
+    "relax_wall_seconds",
+    "reaction_check_wall_seconds",
+    "archive_wall_seconds",
+    "total_wall_seconds",
+    "side_minus1_optimizer_steps",
+    "side_plus1_optimizer_steps",
+    "side_minus1_status",
+    "side_plus1_status",
+    "outcome",
+    "error",
+]
+
+
+def _copy_with_cached_energy_forces(atoms):
+    """Copy a retained continuation endpoint without evaluating its calculator."""
+    calc = getattr(atoms, "calc", None)
+    results = getattr(calc, "results", {}) if calc is not None else {}
+    missing = [key for key in ("energy", "forces") if key not in results]
+    if missing:
+        raise ValueError(
+            "Retained DoubleMin continuation side is missing cached "
+            + " and ".join(missing)
+        )
+    energy = results["energy"]
+    forces = results["forces"]
+    copied = atoms.copy()
+    copied.calc = SinglePointCalculator(
+        copied,
+        energy=energy.copy() if hasattr(energy, "copy") else energy,
+        forces=forces.copy() if hasattr(forces, "copy") else forces,
+    )
+    return copied, energy, forces
+
+
+def _append_doublemin_timing_csv(path, row):
+    """Append one monotonic wall-time record per DoubleMin execution."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    is_new = not os.path.exists(path) or os.path.getsize(path) == 0
+    with open(path, "a", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=DOUBLEMIN_TIMING_FIELDS)
+        if is_new:
+            writer.writeheader()
+        writer.writerow({key: row.get(key, "") for key in DOUBLEMIN_TIMING_FIELDS})
+
+
 MINIMIZER_DIAGNOSTIC_FIELDS = [
     "record_type",
     "execution_id",
@@ -21,6 +77,7 @@ MINIMIZER_DIAGNOSTIC_FIELDS = [
     "src_index",
     "rank",
     "side",
+    "diagnostic_serial",
     "optimizer_step",
     "active_optimizer",
     "switch_event",
@@ -28,13 +85,52 @@ MINIMIZER_DIAGNOSTIC_FIELDS = [
     "step_norm",
     "step_clipped",
     "direction_alignment",
+    "raw_step_norm",
+    "raw_step_max",
+    "actual_step_norm",
+    "actual_step_max",
+    "maxstep",
+    "maxstep_rescaled",
+    "clip_scale",
+    "damping",
+    "applied_scale",
     "warm_start_history",
     "history_pairs_at_switch",
     "lbfgs_history_size",
     "lbfgs_pairs_accepted_total",
     "lbfgs_pairs_rejected_total",
+    "lbfgs_pairs_skipped_total",
+    "lbfgs_pairs_damped_total",
+    "lbfgs_pairs_powell_damped_total",
+    "lbfgs_worst_raw_s_dot_y",
     "lbfgs_history_resets",
     "lbfgs_last_reset_reason",
+    "lbfgs_curvature_guard",
+    "lbfgs_curvature_floor",
+    "lbfgs_powell_eta",
+    "lbfgs_latest_guard_action",
+    "lbfgs_latest_powell_theta",
+    "lbfgs_latest_powell_s_dot_Bs",
+    "lbfgs_alpha",
+    "lbfgs_initial_inverse_hessian_scale",
+    "lbfgs_memory",
+    "lbfgs_use_line_search",
+    "lbfgs_force_calls",
+    "lbfgs_function_calls",
+    "lbfgs_step_force_calls",
+    "lbfgs_step_function_calls",
+    "lbfgs_alpha_k",
+    "lbfgs_latest_s_norm",
+    "lbfgs_latest_y_norm",
+    "lbfgs_latest_s_dot_y",
+    "lbfgs_latest_secant_curvature",
+    "lbfgs_latest_secant_cosine",
+    "lbfgs_latest_force_change_norm",
+    "lbfgs_latest_pair_damped",
+    "lbfgs_latest_raw_s_dot_y",
+    "lbfgs_latest_raw_secant_curvature",
+    "lbfgs_latest_stored_s_dot_y",
+    "lbfgs_latest_stored_secant_curvature",
     "fire_dt",
     "final_active_optimizer",
     "switch_count",
@@ -44,8 +140,36 @@ MINIMIZER_DIAGNOSTIC_FIELDS = [
 ]
 
 
+def _migrate_csv_header_if_needed(path, fieldnames):
+    """Expand an older additive diagnostic header without dropping rows."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return
+    with open(path, newline="") as handle:
+        reader = csv.DictReader(handle)
+        old_fields = list(reader.fieldnames or [])
+        if old_fields == list(fieldnames):
+            return
+        if not old_fields or not set(old_fields).issubset(set(fieldnames)):
+            raise ValueError(
+                f"Refusing incompatible diagnostic CSV schema migration for {path}: "
+                f"old={old_fields}, new={list(fieldnames)}"
+            )
+        rows = list(reader)
+    directory = os.path.dirname(path) or "."
+    with tempfile.NamedTemporaryFile(
+        mode="w", newline="", dir=directory, delete=False
+    ) as handle:
+        temp_path = handle.name
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for old_row in rows:
+            writer.writerow({key: old_row.get(key, "") for key in fieldnames})
+    os.replace(temp_path, path)
+
+
 def _append_optimizer_csv(path, row):
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    _migrate_csv_header_if_needed(path, MINIMIZER_DIAGNOSTIC_FIELDS)
     is_new = not os.path.exists(path) or os.path.getsize(path) == 0
     with open(path, "a", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=MINIMIZER_DIAGNOSTIC_FIELDS)
@@ -114,6 +238,25 @@ def _optimizer_kwargs(config_dict):
     name = str(config_dict["Main"]["Optimizer"])
     if name.lower() in {"firelbfgs", "fire_lbfgs", "warmfirelbfgs"}:
         return dict(config_dict.get("FIRELBFGS", {}) or {})
+    if name.lower() == "lbfgs":
+        # [LBFGS] remains a pure ASE pass-through.  SaddleMill-only curvature
+        # safeguards live in [ourLBFGS] and are merged only here, where
+        # Minimization/DoubleMin wrap ASE LBFGS with DiagnosticLBFGS.
+        kwargs = dict(config_dict.get("LBFGS", {}) or {})
+        kwargs.update(dict(config_dict.get("ourLBFGS", {}) or {}))
+        from saddlemill.dimertools.wave_b_runtime import wave_b_options_from_config
+        shadow = dict(wave_b_options_from_config(config_dict).get("qn_shadow", {}) or {})
+        method_name = str(config_dict.get("Main", {}).get("method", "Minimization"))
+        relax_section = dict(config_dict.get("our" + method_name, {}) or {})
+        relax_cell = bool(relax_section.get("relax_cell", False))
+        shadow.update({
+            "consumer": "doublemin_side" if method_name == "DoubleMinimization" else "minimization",
+            "residual_kind": "generalized_optimizer_force" if relax_cell else "physical_force",
+            "force_interpretation": "generalized_optimizer_force" if relax_cell else "raw_physical_force",
+            "model_type": "generalized_optimizer_bfgs" if relax_cell else "ordinary_bfgs_hessian",
+        })
+        kwargs["qn_shadow_options"] = shadow
+        return kwargs
     return dict(config_dict.get(name, {}) or {})
 
 
@@ -126,7 +269,17 @@ def relax_structure(
     diagnostic_path=None,
     diagnostic_metadata=None,
 ):
-    opt = Optimizer(
+    optimizer_class = Optimizer
+    # Ordinary Minimization/DoubleMin with Optimizer=LBFGS uses an exact
+    # diagnostic subclass whose numerical step delegates unchanged to ASE.
+    # Keep the global config loader returning ASE LBFGS so NEB and other call
+    # sites retain their existing class identity and behavior.
+    from ase.optimize import LBFGS as ASELBFGS
+    if Optimizer is ASELBFGS:
+        from saddlemill.fire_lbfgs import DiagnosticLBFGS
+        optimizer_class = DiagnosticLBFGS
+
+    opt = optimizer_class(
         optimizable,
         logfile=logfile,
         trajectory=trajfile,
@@ -248,6 +401,13 @@ def geomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, exe
 def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=None, executorlib_worker_id=None, **kwargs):
 
     rank = executorlib_worker_id
+    dm_wall_start = time.perf_counter()
+    dm_execution_id = f"{i}-{rank}-{os.getpid()}-{time.time_ns()}"
+    side_wall_seconds = {-1: "", 1: ""}
+    side_optimizer_steps = {-1: "", 1: ""}
+    side_timing_status = {-1: "", 1: ""}
+    reaction_check_wall_seconds = ""
+    archive_wall_seconds = ""
 
     max_consecutive_errors = config_dict["Main"]["max_consecutive_errors"]
     if consecutive_errors is not None and consecutive_errors[0] >= max_consecutive_errors > 0:
@@ -266,6 +426,45 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
     my_output_file = f"{method_name}_trajes/collected_opt_rank_{rank}.traj"
     zip_name = f"{method_name}_debug_zips/structure_rank_{rank}_data.zip"
     task_name = get_task_name(config_dict)
+    timing_file = f"{method_name}_timing_csvs/timing_rank_{rank}.csv"
+
+    def _write_timing(parent_source_idx, outcome, error=""):
+        # Timing is diagnostic-only: never change a chemistry/status outcome if
+        # writing the additive timing shard itself fails.
+        try:
+            finite_side_times = [
+                float(v) for v in side_wall_seconds.values() if v != ""
+            ]
+            _append_doublemin_timing_csv(
+                timing_file,
+                {
+                    "execution_id": dm_execution_id,
+                    "src_index": i,
+                    "rank": rank,
+                    "parent_ts_index": parent_source_idx,
+                    "optimizer": config_dict["Main"].get("Optimizer", ""),
+                    "fmax": config_dict["Main"].get("fmax", ""),
+                    "steps_limit": config_dict["Main"].get("steps", ""),
+                    "side_minus1_wall_seconds": side_wall_seconds[-1],
+                    "side_plus1_wall_seconds": side_wall_seconds[1],
+                    "relax_wall_seconds": sum(finite_side_times),
+                    "reaction_check_wall_seconds": reaction_check_wall_seconds,
+                    "archive_wall_seconds": archive_wall_seconds,
+                    "total_wall_seconds": time.perf_counter() - dm_wall_start,
+                    "side_minus1_optimizer_steps": side_optimizer_steps[-1],
+                    "side_plus1_optimizer_steps": side_optimizer_steps[1],
+                    "side_minus1_status": side_timing_status[-1],
+                    "side_plus1_status": side_timing_status[1],
+                    "outcome": outcome,
+                    "error": error,
+                },
+            )
+        except Exception as timing_exc:
+            print(
+                f"Rank {rank}: WARNING failed to write DoubleMin timing for "
+                f"structure {i}: {timing_exc}",
+                flush=True,
+            )
 
     def log_status(side_id, parent_source_idx, status_msg, n_force_calls=0):
         with open(status_file, 'a') as f:
@@ -279,19 +478,56 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
     entries_to_run = kwargs.get('entries_to_run')        # set of side_ids (-1, 1) or None
     with Trajectory(my_output_file, 'a') as writer:
         orig = atoms.info.get('orig_info', {})
-        parent_source_idx = orig.get('src_index')
+        parent_source_idx = orig.get('hessian_parent_source_idx', orig.get('src_index'))
         try:
-            if 'eigenmode' not in orig:
+            # SADDLEMILL_DOUBLEMIN_FAIRCHEM_HESSIAN_V2
+            # SADDLEMILL_STANDALONE_HESSIAN_DOUBLEMIN_BRIDGE_V2
+            dm_cfg = config_dict.get('ourDoubleMinimization', {}) or {}
+            use_pre_hessian = bool(dm_cfg.get('pre_hessian_eigenmode', False))
+            require_first_order = bool(dm_cfg.get('pre_hessian_require_first_order', True))
+            from saddlemill.doublemin_hessian import (
+                compute_pre_hessian_eigenmode,
+                find_standalone_hessian_info,
+                read_standalone_hessian_initialization,
+            )
+            standalone_hessian_info = find_standalone_hessian_info(atoms)
+            if standalone_hessian_info is not None and use_pre_hessian:
+                raise ValueError(
+                    "DoubleMin input already contains a standalone Hessian result, but "
+                    "pre_hessian_eigenmode=True requests a second inline Hessian. "
+                    "Set pre_hessian_eigenmode=False for the split Hessian -> DoubleMin workflow."
+                )
+            if 'eigenmode' not in orig and standalone_hessian_info is None and not use_pre_hessian:
                 raise Exception("Input structure missing 'eigenmode' in info.")
             if 'src_index' not in orig:
                 raise Exception("Input structure missing 'src_index' in info.")
 
-            # Identify IDs
-            refined_eigenmode = orig['eigenmode']
-
-            # --- OPTIONAL: Refine eigenmode via dimer rotation ---
+            refined_eigenmode = orig.get('eigenmode')
             curvature = orig.get('curvature')
-            if config_dict['ourDoubleMinimization']['pre_dimer_refine']:
+            hessian_initialization_info = {}
+
+            if standalone_hessian_info is not None:
+                refined_eigenmode, curvature, hessian_initialization_info = (
+                    read_standalone_hessian_initialization(
+                        atoms,
+                        require_first_order=require_first_order,
+                    )
+                )
+            elif use_pre_hessian:
+                refined_eigenmode, curvature, hessian_initialization_info = (
+                    compute_pre_hessian_eigenmode(
+                        atoms,
+                        config_dict,
+                        src_index=i,
+                        rank=rank,
+                        parent_source_idx=parent_source_idx,
+                        parent_attempt_id=orig.get('attempt_id', ''),
+                        input_eigenmode=orig.get('eigenmode'),
+                        input_curvature=orig.get('curvature'),
+                    )
+                )
+
+            if dm_cfg.get('pre_dimer_refine', False):
                 dimer_log = f'dimer_refine_{i}.log'
                 temp_files.append(dimer_log)
                 refined_eigenmode, curvature = _refine_eigenmode(
@@ -299,6 +535,8 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                     dimer_control_kwargs=config_dict.get("DimerControl", {}),
                     control_logfile=dimer_log,
                 )
+                if standalone_hessian_info is not None:
+                    hessian_initialization_info['doublemin_post_hessian_dimer_refine'] = 1
 
             continue_from_result = config_dict["Main"]["continue_from_result"]
 
@@ -313,7 +551,10 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
 
             # --- MINIMIZE BOTH SIDES ---
             mins = {}  # side -> (atoms, converged)
-            displacement = 0.25
+            displacement = float(dm_cfg.get('displacement', 0.25))
+            if displacement <= 0.0:
+                raise ValueError('[ourDoubleMinimization] displacement must be > 0 A')
+            ts_atoms.info['doublemin_displacement_A'] = displacement
 
             # Per-side VASP calc cache: instantiated lazily, reused for both
             # the desorption-check single-point AND the subsequent relaxation
@@ -341,6 +582,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                 skip_side = max(energies, key=energies.get)
 
             for side in [-1, 1]:
+                side_wall_start = time.perf_counter()
                 should_run = entries_to_run is None or side in entries_to_run
 
                 if side == skip_side:
@@ -391,11 +633,11 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                 else:
                     if not (continuation_data and side in continuation_data):
                         raise ValueError(f"Missing continuation data for kept side={side}")
-                    min_atoms = continuation_data[side].copy()
+                    min_atoms, energy, forces = _copy_with_cached_energy_forces(
+                        continuation_data[side]
+                    )
                     conv = bool(min_atoms.info.get('orig_info', {}).get('converged'))
                     side_nfc = 0
-                    energy = min_atoms.get_potential_energy()
-                    forces = min_atoms.get_forces()
 
                 min_atoms.info['side'] = side
                 min_atoms.info['parent_ts_index'] = parent_source_idx
@@ -403,15 +645,19 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                 min_atoms.info['src_index'] = i
                 min_atoms.info['n_force_calls'] = int(side_nfc)
                 mins[side] = (min_atoms, conv, energy, forces, side_nfc)
+                side_wall_seconds[side] = time.perf_counter() - side_wall_start
+                side_optimizer_steps[side] = int(side_nfc)
 
             min1, conv1, min1_energy, min1_forces, min1_nfc = mins[-1]
             min2, conv2, min2_energy, min2_forces, min2_nfc = mins[1]
 
             # --- CHECK REACTION ---
+            reaction_check_start = time.perf_counter()
             neighbor_fudge = 1.25
             res = check_reaction(min1, min2, neighbor_fudge=neighbor_fudge)
             ads_res = check_adsorbate_reaction(min1, min2, neighbor_fudge=neighbor_fudge,
                                                target_tag=2)
+            reaction_check_wall_seconds = time.perf_counter() - reaction_check_start
             reaction_info = {
                 'is_reaction': res['occurred'],
                 'broken_bonds': sorted(res['broken_bonds']),
@@ -426,6 +672,10 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
             }
             for obj in [min1, min2, ts_atoms]:
                 obj.info.update(reaction_info)
+                obj.info['doublemin_displacement_A'] = displacement
+            if hessian_initialization_info:
+                for obj in [min1, min2, ts_atoms]:
+                    obj.info.update(hessian_initialization_info)
             ts_atoms.info['side'] = 0
             ts_atoms.info['src_index'] = i
             ts_atoms.info['eigenmode'] = refined_eigenmode
@@ -441,6 +691,8 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                     side_statuses[side] = "converged" if mins[side][1] else "not_converged"
             min1.info['status'] = side_statuses[-1]
             min2.info['status'] = side_statuses[1]
+            side_timing_status[-1] = side_statuses[-1]
+            side_timing_status[1] = side_statuses[1]
             ts_atoms.info['status'] = "converged"
             min1.info['task_name'] = task_name
             min2.info['task_name'] = task_name
@@ -456,8 +708,10 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
             writer.write(min2)
 
             # --- CLEANUP (Success Case) ---
+            archive_start = time.perf_counter()
             archive_and_clear_temp_files(temp_files, zip_name, prefix="",
                                          enabled=config_dict['Main']['zip'])
+            archive_wall_seconds = time.perf_counter() - archive_start
 
             for side in mins:
                 if entries_to_run is None or side in entries_to_run:
@@ -465,6 +719,7 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
 
             if consecutive_errors is not None:
                 consecutive_errors[0] = 0
+            _write_timing(parent_source_idx, "success")
 
         except Exception as e:
             # --- CLEANUP (Error Case) ---
@@ -478,8 +733,11 @@ def doublegeomopt(i, config_dict, atoms, calc, Optimizer, consecutive_errors=Non
                 if entries_to_run is None or side in entries_to_run:
                     log_status(side, parent_source_idx, f"error: {str(e)}")
 
+            archive_start = time.perf_counter()
             archive_and_clear_temp_files(temp_files, zip_name, prefix="ERROR_",
                                          enabled=config_dict['Main']['zip'])
+            archive_wall_seconds = time.perf_counter() - archive_start
+            _write_timing(parent_source_idx, "error", str(e))
 
 
 def singlepoint(i, config_dict, atoms, calc, consecutive_errors=None,
