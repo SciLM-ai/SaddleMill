@@ -365,6 +365,24 @@ class TestInitialGuess:
         mode, _, exact = lowest_mode(images[0].info["orig_info"])
         assert exact and np.allclose(mode, modes[0])
 
+    def test_exact_mode_wins_over_approx_for_the_seed(self):
+        """With both modes in orig_info, the seed that sellaopt and dimeropt read
+        (top level, then orig_info) is eigenmodes3[0], not approx_eigenmode."""
+        from saddlemill.tools import lowest_mode
+        _seed()
+        atoms = bulk("Cu", "fcc", a=3.6, cubic=True) * (2, 2, 2)
+        modes = np.random.randn(3, len(atoms), 3)
+        approx = np.random.randn(len(atoms), 3)
+        atoms.info["orig_info"] = {"eigenmodes3": modes, "eigenvalues3": [-0.3, 0.2, 0.4],
+                                   "approx_eigenmode": approx, "approx_curvature": -0.1}
+        images, dds, idxs = get_initial_guess_attempts(atoms)
+        assert "approx_eigenmode" not in images[0].info
+        info = images[0].info
+        seed = lowest_mode(info)[0]
+        if seed is None:
+            seed = lowest_mode(info["orig_info"])[0]
+        assert np.allclose(seed, modes[0])
+
 
 # =========================================================================
 # TestOCReactionTypes

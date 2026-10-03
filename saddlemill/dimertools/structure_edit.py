@@ -6,6 +6,7 @@ from ase.constraints import FixAtoms
 from ase.neighborlist import NeighborList, natural_cutoffs, neighbor_list, mic
 from ase.build import make_supercell
 from ase.data import covalent_radii, atomic_numbers
+from saddlemill.tools import lowest_mode
 
 
 def _attempts_cfg(config_dict):
@@ -926,14 +927,17 @@ def get_initial_guess_attempts(atoms):
     so that dimeropt can seed the dimer with it instead of a random guess. An
     exact Hessian mode (orig_info['eigenmodes3']) needs no copy: dimeropt and
     sellaopt read it from orig_info, and promoting it would carry the input's
-    spectrum onto the output frame.
+    spectrum onto the output frame. When orig_info carries the exact mode, the
+    approx_eigenmode is not promoted either: a promoted approx_eigenmode sits at
+    the top level, which dimeropt and sellaopt read first, so it would win over
+    the exact mode that lowest_mode prefers.
     """
     atoms_new = atoms.copy()
     atoms_new.info['reaction_type'] = 'initial_guess'
 
     # Propagate the saddle search's mode from orig_info if present
     orig = atoms.info.get('orig_info', {})
-    if 'approx_eigenmode' in orig:
+    if 'approx_eigenmode' in orig and not lowest_mode(orig)[2]:
         atoms_new.info['approx_eigenmode'] = np.array(orig['approx_eigenmode'])
 
     disp_vector = np.random.randn(len(atoms_new), 3) * 1e-10
