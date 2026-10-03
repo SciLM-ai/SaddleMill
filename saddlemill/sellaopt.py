@@ -307,6 +307,8 @@ def sellaopt(i, config_dict, atoms_orig, calc, consecutive_errors=None,
                     logfile=temp_opt_log, trajectory=temp_traj,
                     hessian=initial_H,
                 )
+                if our["maxiter"] is not None:
+                    dyn.diagkwargs["maxiter"] = our["maxiter"]
 
                 # PR Check - skip early steps to let Sella's Hessian model pick
                 # up the unstable mode (the initial displacement can look
@@ -336,8 +338,10 @@ def sellaopt(i, config_dict, atoms_orig, calc, consecutive_errors=None,
                     if n_components > 1:
                         raise StopRun(f"Adsorbate desorbed")
 
-                dyn.attach(check_delocalization, interval=5)
-                dyn.attach(check_desorption, interval=5)
+                if our["check_delocalization"]:
+                    dyn.attach(check_delocalization, interval=5)
+                if our["check_desorption"]:
+                    dyn.attach(check_desorption, interval=5)
 
                 stop_reason = None
                 stopped_early = False

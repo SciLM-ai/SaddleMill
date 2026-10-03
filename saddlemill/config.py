@@ -144,6 +144,10 @@ class ConfigManager:
             # Frames without one run as usual (with a warning). Not applied to
             # continuations; the consumed Hessian is dropped from the output.
             "initial_hessian": False,
+            # Most force calls of one Sella mode search (Sella's PES.diag maxiter); None keeps Sella's default.
+            "maxiter": None,
+            "check_desorption": True,
+            "check_delocalization": True,
             "vasp_command": None,
             "vasp_ncore": None,
         },
