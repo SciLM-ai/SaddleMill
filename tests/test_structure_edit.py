@@ -9,6 +9,7 @@ from ase import Atoms
 from ase.build import bulk, fcc111, add_adsorbate
 from ase.calculators.emt import EMT
 from ase.constraints import FixAtoms
+from ase.neighborlist import mic
 
 from saddlemill.dimertools.structure_edit import (
     turn_into_supercell,
@@ -201,6 +202,19 @@ class TestBulkHopReuse:
         for dd in dds:
             if "displacement_vector" in dd:
                 assert dd["displacement_vector"].shape == (len(emt_cu_bulk), 3)
+
+    def test_moves_halfway_to_nearest_site(self, emt_cu_bulk):
+        """The chosen atom moves half the MIC vector to its nearest interstitial site."""
+        _seed()
+        sites = find_interstitial_sites(emt_cu_bulk)
+        cell = emt_cu_bulk.get_cell()
+        images, dds, idxs = get_hop_reuse_attempts(emt_cu_bulk, 10)
+        for dd, idx in zip(dds, idxs):
+            if dd.get("method") != "vector":
+                continue
+            to_sites = mic(sites - emt_cu_bulk.positions[idx], cell)
+            nearest = to_sites[np.argmin(np.linalg.norm(to_sites, axis=1))]
+            np.testing.assert_allclose(dd["displacement_vector"][idx], 0.5 * nearest, atol=1e-8)
 
 
 # =========================================================================

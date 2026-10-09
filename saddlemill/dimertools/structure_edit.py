@@ -396,7 +396,6 @@ def get_hop_reuse_attempts(atoms, num_attempts, config_dict=None):
     p = _swap_prob(config_dict)
     positions = atoms.get_positions()
     weights = _get_atom_selection_weights(atoms)
-    site_idx_list = _shuffled_site_indices(len(sites), num_attempts)
 
     images = []
     displacement_dicts = []
@@ -406,9 +405,8 @@ def get_hop_reuse_attempts(atoms, num_attempts, config_dict=None):
         atom_idx = np.random.choice(len(atoms), p=weights)
         atom_pos = positions[atom_idx]
 
-        # Use pre-shuffled site for diversity across attempts
-        site_a = sites[site_idx_list[attempt]]
-        delta = mic(site_a - atom_pos, cell)
+        # Hop toward the interstitial site nearest to the chosen atom
+        _, delta = _nearest_site(atom_pos, sites, cell)
 
         atoms_new = atoms.copy()
         atoms_new.info['reaction_type'] = 'hop_reuse'
