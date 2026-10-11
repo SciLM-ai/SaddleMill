@@ -1,16 +1,29 @@
 """Filter NEB_trajes/ -> NEB_trajes_filtered/.
 
-Drops a band (identified by src_index within a rank file) if any of:
+A band is one (src_index, subband_idx) segment within a rank file; a frame
+without 'subband_idx' counts as sub-band 0. Each sub-band is judged on its
+own, against its own status and climbing image. A band is dropped if any of:
 
-  1. status does not start with "converged"  (drops "not_converged",
-     "error", "not_converged_StopRun", etc; keeps "converged" and
-     "converged_CI")
-  2. any frame in the band has no energy/forces  (catches the 2 truncated
-     bands rank 24 src=88937 and rank 59 src=89231 that we couldn't recover)
-  3. an intermediate minimum is present  -- detected energy-wise: any
-     interior image i (0 < i < n-1) whose energy is strictly less than both
-     neighbors. Bands are dedup'd by image_idx first (imin boundaries are
-     duplicated across sub-bands in the collected output).
+  1. it is not converged: status does not start with "converged"  (drops
+     "not_converged", "error", "not_converged_StopRun", etc; keeps
+     "converged" and "converged_CI"). A frame with no 'status' in its info
+     falls back to the band_converged / band_converged_CI flags nebopt
+     writes; "converged*" is equivalent to either flag being True.
+  2. any frame in the band has no energy/forces  (on mp20bat this caught
+     the 2 truncated bands rank 24 src=88937 and rank 59 src=89231 that we
+     couldn't recover)
+  3. no frame carries info['barrier'], so there is no climbing image (CI)
+  4. an intermediate minimum is present -- see
+     _band_has_intermediate_minimum. Walking image by image from each
+     endpoint toward the CI, with dE the energy change of each step:
+       - a single step with dE < -big_drop_thresh (0.05 eV) flags the band;
+       - two consecutive drops (dE < 0 on two adjacent steps of the same
+         walk) flag it;
+       - a small drop (-big_drop_thresh <= dE < 0) is tolerated as long as
+         neither adjacent step of the same walk is also a drop
+         (endpoint-relaxation jitter).
+     The band is dropped if either the left or the right walk flags.
+     Energies are deduplicated by image_idx first.
 
 Frames in surviving bands are written in the original order.
 
@@ -28,9 +41,8 @@ import os
 import sys
 import time
 import traceback
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 
-import numpy as np
 from ase.io import read
 from ase.io.trajectory import Trajectory
 
@@ -58,8 +70,8 @@ def _band_has_intermediate_minimum(
     consecutive drops anywhere on the walk to CI signal a real basin.
 
     `energies_by_imgidx` maps image_idx -> energy for the band (already
-    deduplicated). `ci_imgidx` is the image_idx of the CI (taken from
-    info['barrier']).
+    deduplicated). `ci_imgidx` is the image_idx of the CI (the frame that
+    carries info['barrier']).
     """
     n = len(energies_by_imgidx)
     if n < 3:
@@ -110,15 +122,27 @@ def _band_has_energy(frames) -> bool:
     return True
 
 
+def _frame_converged(a) -> bool:
+    """True if the frame's status starts with 'converged'. Without a 'status'
+    key, fall back to nebopt's flags: status "converged" is written exactly
+    when band_converged is True and "converged_CI" exactly when only
+    band_converged_CI is, so either flag being True is the same test."""
+    st = a.info.get("status")
+    if st is not None:
+        return str(st).startswith("converged")
+    return bool(a.info.get("band_converged") or a.info.get("band_converged_CI"))
+
+
 def _all_converged(frames) -> bool:
-    """All frames' status must start with 'converged'. (All frames in a
-    sub-band share status; converging on src_index level we want every
-    sub-band's frames to be converged — anything not_converged → drop.)"""
-    for a in frames:
-        st = a.info.get("status", "")
-        if not st.startswith("converged"):
-            return False
-    return True
+    """All frames of the band must be converged (all frames in a sub-band
+    share status) — anything not_converged → drop."""
+    return all(_frame_converged(a) for a in frames)
+
+
+def _band_key(a) -> tuple[int, int]:
+    """(src_index, subband_idx) of a frame; frames without 'subband_idx'
+    belong to sub-band 0."""
+    return a.info["src_index"], a.info.get("subband_idx", 0)
 
 
 def filter_rank(rank, in_dir, out_dir, big_drop_thresh=0.05):
@@ -143,21 +167,21 @@ def filter_rank(rank, in_dir, out_dir, big_drop_thresh=0.05):
     frames = read(in_path, index=":")
     stats["n_frames_in"] = len(frames)
 
-    # Group by src_index, preserving first-seen order.
-    band_order: list[int] = []
-    band_frames: dict[int, list] = OrderedDict()
+    # Group by (src_index, subband_idx), preserving first-seen order.
+    band_order: list[tuple[int, int]] = []
+    band_frames: dict[tuple[int, int], list] = OrderedDict()
     for a in frames:
-        si = a.info["src_index"]
-        if si not in band_frames:
-            band_order.append(si)
-            band_frames[si] = []
-        band_frames[si].append(a)
+        key = _band_key(a)
+        if key not in band_frames:
+            band_order.append(key)
+            band_frames[key] = []
+        band_frames[key].append(a)
 
     stats["n_bands_in"] = len(band_order)
 
-    keep_srcs: set[int] = set()
-    for si in band_order:
-        chunk = band_frames[si]
+    keep_keys: set[tuple[int, int]] = set()
+    for key in band_order:
+        chunk = band_frames[key]
 
         if not _all_converged(chunk):
             stats["drop_status"] += 1
@@ -167,8 +191,8 @@ def filter_rank(rank, in_dir, out_dir, big_drop_thresh=0.05):
             continue
 
         # Imin via walk from each endpoint to CI. Dedupe by image_idx so a
-        # duplicated boundary image doesn't create false neighbors. CI is the
-        # image whose info has 'barrier' (matches extract_neb_triplets.py).
+        # repeated image doesn't create false neighbors. CI is the image
+        # whose info has 'barrier' (matches extract_neb_triplets.py).
         e_by_idx: dict[int, float] = {}
         ci_imgidx: int | None = None
         for a in chunk:
@@ -187,18 +211,18 @@ def filter_rank(rank, in_dir, out_dir, big_drop_thresh=0.05):
             stats["drop_imin"] += 1
             continue
 
-        keep_srcs.add(si)
+        keep_keys.add(key)
 
     # Write output preserving the original frame order across kept bands.
     os.makedirs(out_dir, exist_ok=True)
     n_out = 0
     with Trajectory(out_path, "w") as tr:
         for a in frames:
-            if a.info["src_index"] in keep_srcs:
+            if _band_key(a) in keep_keys:
                 tr.write(a)
                 n_out += 1
     stats["n_frames_out"] = n_out
-    stats["n_bands_out"] = len(keep_srcs)
+    stats["n_bands_out"] = len(keep_keys)
     return stats
 
 
