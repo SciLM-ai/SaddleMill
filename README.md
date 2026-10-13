@@ -1,6 +1,29 @@
 # SaddleMill
 
-## Installation
+High-throughput transition-state searches (Dimer, Sella, NEB) and minimizations with machine-learned potentials
+or DFT, from one GPU to many nodes. It computed the
+[MaterialsSaddles](https://huggingface.co/datasets/SciLM/MaterialsSaddles) dataset.
+
+## Install with pip (one GPU, no Flux)
+
+```bash
+pip install "saddlemill[sella]"      # [sella] adds Sella for method = Sella; the other methods do not need it
+python -c "import torch; print(torch.cuda.is_available())"   # should print True
+```
+
+**Linux on ARM (aarch64), e.g. NVIDIA GH200:** PyPI has only CPU builds of torch for aarch64, so install the CUDA
+build first: `pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu129` (`torch==2.8.0` from
+the same index with fairchem-core 2.19–2.21).
+
+This runs the jobs one after another in a single process: set `executorlib = False` in `config.ini` and run
+`python -u -m saddlemill` (see [Running SaddleMill](#running-saddlemill)). UMA models are gated: accept the license
+at [facebook/UMA](https://huggingface.co/facebook/UMA) and run `hf auth login`.
+
+Running many jobs in parallel over GPUs and nodes needs executorlib and the Flux scheduler. `pip install
+"saddlemill[distributed]"` adds executorlib, but Flux is not on PyPI (the PyPI package named `flux-core` is an
+unrelated project): install it from conda-forge as in the HPC steps below.
+
+## Installation on HPC (multi-node, with Flux)
 
 ### 1. Base Environment Setup
 
@@ -327,7 +350,7 @@ xc = PBE
 
 Per-tag precedence is **`[Vasp]` key → `input_generator` output → ASE/VASP default**: a tag you set in `[Vasp]` always wins; a tag the generator supplies is used when `[Vasp]` is silent; a tag in neither falls back to ASE's default. The generator contributes only electronic/accuracy settings — ionic-driver tags (`IBRION`/`NSW`/`POTIM`/`EDIFFG`) are stripped, since SaddleMill drives the geometry through ASE.
 
-A custom generator is any function `generator(atoms) -> dict` returning ASE-`Vasp` kwargs (lowercased INCAR tags plus `kpts`/`gamma`/`setups`/`magmom`); point `input_generator` at it as `module:func` or `file.py:func`. The `omat24_*`/`cheap_omat` built-ins need `fairchem-data-omat` and `oc20`/`cheap_oc20` need `fairchem-data-oc` installed (see Installation above); `oc22`/`cheap_oc22` are self-contained (the exact Meta OC22 settings are frozen inside SaddleMill, since the upstream `OC22_dataset` code is deprecated and today's pymatgen has drifted from what Meta ran).
+A custom generator is any function `generator(atoms) -> dict` returning ASE-`Vasp` kwargs (lowercased INCAR tags plus `kpts`/`gamma`/`setups`/`magmom`); point `input_generator` at it as `module:func` or `file.py:func`. The `omat24_*`/`cheap_omat` built-ins need `fairchem-data-omat` and `oc20`/`cheap_oc20` need `fairchem-data-oc` installed (see the HPC installation above); `oc22`/`cheap_oc22` are self-contained (the exact Meta OC22 settings are frozen inside SaddleMill, since the upstream `OC22_dataset` code is deprecated and today's pymatgen has drifted from what Meta ran).
 
 The `oc22` built-in reproduces the OC22 dataset's level of theory exactly (arXiv:2206.08917): PBE + Materials Project Hubbard U, spin-polarized with MP-default initial moments (magmoms already on the atoms win), ENCUT 500, Γ-centered `ceil(30/a) × ceil(30/b) × 1` meshes, 2022-era MPRelaxSet POTCAR setups, and dipole correction only when the structure has tag=2 adsorbate atoms (Meta applied it to adsorbate+slabs only). Meta used the PBE 5.4 POTCAR library — add `pp_version = 54` in `[Vasp]` if your `$VASP_PP_PATH` has versioned `potpaw_PBE.54` folders. The `cheap_oc20`/`cheap_oc22` variants follow the `cheap_omat` recipe: the in-plane k-point multiplier is halved (40→20 / 30→15) and POTCARs are lightened (`minimal` base, soft `_s` O/C/N, f-in-core lanthanides kept) so ENCUT can drop to ~300 via `[Vasp]` — spin, U and the functional are untouched, so the cheap pass stays on the same PES; reconverge with the exact preset afterwards.
 
