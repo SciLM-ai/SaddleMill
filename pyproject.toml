@@ -6,6 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "saddlemill"
 version = "0.1.0"
 description = "High-throughput transition state search using neural network potentials or DFT"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Ilgar Baghishov"}, {name = "Sung Hoon Jung"}, {name = "Graeme Henkelman"}]
 requires-python = ">=3.10"
 dependencies = [
     "ase>=3.26.0",
@@ -14,6 +17,11 @@ dependencies = [
     "scipy",
     "matplotlib",
 ]
+
+[project.urls]
+Homepage = "https://github.com/SciLM-ai/SaddleMill"
+Repository = "https://github.com/SciLM-ai/SaddleMill"
+Dataset = "https://huggingface.co/datasets/SciLM/MaterialsSaddles"
 
 [project.optional-dependencies]
 test = [
