@@ -26,6 +26,10 @@ gpu = [
 distributed = [
     "executorlib",
 ]
+# method = Sella (P-RFO saddle search); imported only by sellaopt.py, so the other methods work without it.
+sella = [
+    "sella>=2.5",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
