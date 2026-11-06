@@ -3,9 +3,38 @@ import socket
 import traceback
 from saddlemill.config import load_config, load_calculator, load_optimizer
 
+MATH_THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+
+
+def limit_math_threads(config_dict):
+    """CPU math threads per job ([Main] threads_per_job, default 1); a value already in the environment wins.
+
+    Every worker runs one job at a time. Left unset, numpy/scipy (OpenBLAS) and torch each start a thread per core
+    they can see, and on the few-hundred-dimensional matrices of a saddle search (Sella's projections, eigh, lstsq,
+    QR on 3N x 3N) those threads mostly wait on each other: one 225-atom OC20 slab ran 10x slower than single-threaded,
+    with the GPU idle. Called in the main process before workers start (they inherit the environment) and again in
+    each worker for libraries that are already loaded (threadpoolctl if installed, and torch).
+    """
+    n = int(config_dict["Main"].get("threads_per_job", 1) or 1)
+    for v in MATH_THREAD_VARS:
+        os.environ.setdefault(v, str(n))
+    n = int(os.environ["OMP_NUM_THREADS"])
+    try:
+        from threadpoolctl import threadpool_limits
+        threadpool_limits(n)
+    except Exception:
+        pass
+    try:
+        import torch
+        torch.set_num_threads(n)
+    except Exception:
+        pass
+
+
 def init_function(executorlib_worker_id=None):
     try:
         config_dict = load_config("config.ini")
+        limit_math_threads(config_dict)
 
         is_gpu_job = (config_dict["Main"]["Calculator"] not in ("Vasp", "VaspInteractive")
                       and config_dict[config_dict["Main"]["Calculator"]].get("device") == "cuda")

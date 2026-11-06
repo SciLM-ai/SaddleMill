@@ -121,6 +121,22 @@ def _mode_and_curvature(dyn, natoms):
         return None, None
 
 
+def _use_gpu_eigh():
+    """Route the eigenproblem of Sella's restricted step (sella.optimize.stepper.eigh) to sella._gpu.gpu_eigh, which the
+    GPU-enabled Sella provides (torch on CUDA above a size threshold, scipy otherwise). Stock Sella has no sella._gpu:
+    nothing changes. Once per process; calls with extra arguments keep the CPU solver."""
+    try:
+        import sella.optimize.stepper as st
+        from sella._gpu import gpu_eigh
+    except ImportError:
+        return False
+    if not getattr(st, "_sm_gpu_eigh", False):
+        cpu = st.eigh
+        st.eigh = lambda A, *a, **k: gpu_eigh(A) if not a and not k else cpu(A, *a, **k)
+        st._sm_gpu_eigh = True
+    return True
+
+
 def _lift_translations(H, atoms):
     """Move the three rigid translations to the top of a seeded Hessian's spectrum.
 
@@ -172,6 +188,8 @@ def _setup_sella(atoms, calc, eigenmode=None, displacement_dict=None,
     atoms.calc = calc
 
     kw = dict(sella_kwargs or {})
+    if kw.pop("_gpu_eigh", False):
+        _use_gpu_eigh()
     kw.setdefault("order", 1)        # first-order saddle
     # Cartesian, not internal coordinates: these are periodic solids and slabs,
     # and Sella's internal-coordinate machinery targets molecular systems.
@@ -203,7 +221,9 @@ def sellaopt(i, config_dict, atoms_orig, calc, consecutive_errors=None,
     is_vasp = config_dict["Main"]["Calculator"] in ("Vasp", "VaspInteractive")
 
     our = config_dict["ourSella"]
-    sella_kwargs = config_dict.get("Sella") or {}
+    sella_kwargs = dict(config_dict.get("Sella") or {})
+    if our.get("gpu_eigh", True) and not is_vasp and config_dict["Main"].get("device", "cuda") == "cuda":
+        sella_kwargs["_gpu_eigh"] = True
     check_index = our.get("check_index", False)
 
     max_consecutive_errors = config_dict["Main"]["max_consecutive_errors"]

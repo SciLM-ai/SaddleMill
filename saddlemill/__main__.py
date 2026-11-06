@@ -3,7 +3,7 @@ import concurrent.futures
 from ase.io import Trajectory
 from itertools import groupby
 from contextlib import nullcontext
-from saddlemill.init_function import init_function
+from saddlemill.init_function import init_function, limit_math_threads
 from saddlemill.tools import (save_ordered_traj_names, read_ordered_traj_names,
                             clean_up_files, load_and_sanitize, passes_input_filter,
                             extract_previous_results, bank_singlepoint_vasp_restarts,
@@ -83,6 +83,7 @@ def main():
         save_ordered_traj_names(trajes_and_idxs)
         create_results_directories(config_dict)
 
+    limit_math_threads(config_dict)                      # workers inherit the environment
     if config_dict["Main"]["executorlib"]:
         from executorlib import FluxJobExecutor
 

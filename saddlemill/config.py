@@ -38,6 +38,10 @@ class ConfigManager:
             "max_consecutive_errors": 5,
             "restart_limit": 3,
             "input_format": "traj",  # traj (default) | lmdb. lmdb is only supported for method=SinglePoint.
+            # CPU math threads (BLAS / OpenMP / torch) per worker. Each worker runs one job; multithreaded BLAS on the
+            # few-hundred-dimensional matrices of a saddle search is far slower than one thread when many workers share
+            # a node (measured 10x for Sella on 225-atom OC20 slabs). An OMP_NUM_THREADS etc. already set wins.
+            "threads_per_job": 1,
         },
         "ourMinimization": {
             "relax_cell": False,
@@ -148,6 +152,9 @@ class ConfigManager:
             "maxiter": None,
             "check_desorption": True,
             "check_delocalization": True,
+            # Solve the eigenproblem of Sella's restricted step on the GPU (sella._gpu.gpu_eigh) when the installed Sella
+            # provides it and a GPU is used; same results, much less CPU time per step on large cells. Stock Sella: ignored.
+            "gpu_eigh": True,
             "vasp_command": None,
             "vasp_ncore": None,
         },

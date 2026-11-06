@@ -24,6 +24,8 @@ examples/**
 !examples/**/config.ini
 !examples/**/data/**
 !examples/**/sched-fluxion-qmanager.toml
+!examples/Reconverge_OC22/README.md
+!examples/Reconverge_OC22/select_index1.py
 examples/NEB_OC20NEB*/**
 examples/nebopt_intcases_impr_tang_aselinear_20images/**
 examples/catsunami/**
